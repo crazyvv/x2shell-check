@@ -3242,7 +3242,9 @@ scan_group() (
     (
         set +m
         local leader group heartbeat result read_rc=0 reap_heartbeat=true
-        read -r leader group < <(command -p sh -c 'command -p ps -o ppid= -o pgid= -p "$$"') ||
+        # Replace the process-substitution shell explicitly. Older Bash versions
+        # can otherwise leave an intermediate shell between the probe and this leader.
+        read -r leader group < <(exec /bin/sh -c 'command -p ps -o ppid= -o pgid= -p "$$"') ||
             { printf 'result 2\n'; exit; }
         [[ $leader =~ ^[1-9][0-9]*$ && $leader == "$group" ]] ||
             { printf 'result 2\n'; exit; }
@@ -3311,7 +3313,7 @@ scan_supervise() {
     if [[ $wait_process_substitution == false ]]; then
         # Older Bash versions do not expose this process substitution through $!.
         local pid
-        read -r pid < <(command -p sh -c 'command -p ps -o ppid= -p "$$"') || return 2
+        read -r pid < <(exec /bin/sh -c 'command -p ps -o ppid= -p "$$"') || return 2
         printf 'supervisor %s\n' "$pid" >&7
     fi
     while IFS=' ' read -r kind value; do

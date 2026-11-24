@@ -356,7 +356,10 @@ fi
     batch=$fixture/batch/x2shell-batch.sh
     cp "$repo/scripts/x2shell-batch.sh" "$batch"
     bash -n "$batch"
-    ! grep -Eq -- '--(jcmd|pid|jdk|root|nginx-path|apache-path|nginx-config|apache-config|apps|cpuinfo|java-path|demo|out|csv|java-package-details)([^[:alnum:]_-]|$)' "$batch"
+    if grep -En -- '--(jcmd|pid|jdk|root|nginx-path|apache-path|nginx-config|apache-config|apps|cpuinfo|java-path|demo|out|csv|java-package-details)([^[:alnum:]_-]|$)' "$batch"; then
+        printf 'Bash batch profile includes a specialized scanning option.\n' >&2
+        exit 1
+    fi
 
     for scanner_profile in "$scanner" "$batch"; do
         rc=0
