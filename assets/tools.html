@@ -47,10 +47,10 @@
   <div class="tools-columns">
     <section id="batch" class="card">
       <h2>批量执行与留档</h2>
-      <p>在每台主机各执行一次。回收时将主机标识、执行时间、报告文件和退出码一并留档。</p>
+      <p><a href="/downloads/x2shell-batch.sh" download>下载独立批量脚本 x2shell-batch.sh</a>。每台主机只需这一个文件，无参执行后保留 JSON 和退出码。</p>
       <div class="tool-command">
         <pre class="command-line"><code id="batch-command">status=0
-bash x2shell-check.sh --all --json &gt; host-audit.json || status=$?
+bash x2shell-batch.sh &gt; host-audit.json || status=$?
 printf 'exit_code=%s\n' "$status"</code></pre>
         <button type="button" class="secondary" data-copy-command="batch-command" aria-describedby="batch-copy-status" aria-label="复制批量巡检命令" hidden>复制</button>
       </div>
@@ -74,9 +74,9 @@ printf 'exit_code=%s\n' "$status"</code></pre>
 
   <section id="production-safety" class="card">
     <h2>生产运行与资源上限</h2>
-    <p>常规批量巡检使用 <code>bash x2shell-check.sh --all --json</code>，并由批量平台限制并发及单主机任务时长。Linux 每个专项最多检查 2,048 个 PID，NGINX 和 Apache 各最多深入检查 24 个匹配进程。macOS 的 Java 进程清点最多处理 2,048 条进程记录。</p>
-    <p>整次巡检默认限时 120 秒。超时后终止扫描进程组并返回 <code>3</code>。JSON 输出用 <code>coverage.scan_timed_out</code> 标记中断，已中断的巡检需要重新运行才能得到完整报告。Bash 用脚本顶部的 <code>SCAN_TIMEOUT</code> 调整时限。Rust 用 <code>collect --scan-timeout 秒数</code> 调整。</p>
-    <p>Java 的显式 <code>--root</code> 总计最多遍历 10,000 个条目，<code>--apps</code> 另有 10,000 个条目额度。两者都限制在起始文件系统内，并遵守各自的搜索深度。达到条目上限且后面还有数据时，报告会标记覆盖不足。没有命中风险门禁时返回 <code>3</code>，已有命中仍返回 <code>1</code>。条目上限约束读取量，单次文件系统访问仍取决于目标主机的 I/O 响应。</p>
+    <p>常规批量巡检使用 <code>bash x2shell-batch.sh</code>，三个组件共用完整版的默认巡检逻辑。批量平台负责限制并发及单主机任务时长。Linux 每个专项最多检查 2,048 个 PID，NGINX 和 Apache 各最多深入检查 24 个匹配进程。macOS 的 Java 进程清点最多处理 2,048 条进程记录。</p>
+    <p>采集与报告交付共用默认 120 秒的时限。超时退出 <code>3</code>，报告写入失败退出 <code>2</code>。如果下游在写出期间阻塞，已写出的 JSON 可能不完整，回收端应同时检查退出码和 JSON。采集阶段超时会限时尝试交付含 <code>coverage.scan_timed_out</code> 的报告。Bash 时限由脚本顶部的 <code>SCAN_TIMEOUT</code> 控制，Rust 使用 <code>collect --scan-timeout 秒数</code>。内核不可中断 I/O 会在 I/O 恢复后响应终止信号。</p>
+    <p>Bash 默认 JDK 发现与显式 <code>--root</code> 共用 10,000 个条目和 1,024 个目录的额度，<code>--apps</code> 单独计算。这些遍历在起始文件系统内按深度逐个处理条目。Rust 的 Linux Java 目录遍历跳过嵌套挂载点，默认 JDK 搜索也跳过已识别的网络挂载和自动挂载。达到上限或跳过挂载时，报告会反映覆盖不足。没有命中风险门禁时返回 <code>3</code>，已有命中仍返回 <code>1</code>。</p>
     <ul>
       <li><code>--jcmd</code> 会主动附加到 JVM，可能启动诊断监听器或造成短暂停顿。延迟敏感业务保持默认设置。</li>
       <li><code>--java-path</code> 会以当前账号执行指定的 Java 启动器。仅在需要版本复核时指定可信文件。需要 <code>timeout</code> 或 <code>gtimeout</code>。两者都缺失时，脚本报错退出。</li>
@@ -85,9 +85,11 @@ printf 'exit_code=%s\n' "$status"</code></pre>
     <details class="scan-options"><summary>展开自定义扫描上限</summary>
       <p>打开 <code>x2shell-check.sh</code>，在开头的「资源上限」区修改对应变量的数值。按正整数填写，保留等号两边的写法。修改后直接用原命令执行，建议先在单台主机验证覆盖和运行时间，再分发同一份脚本。</p>
       <dl>
-        <dt>进程和目录</dt><dd><code>PROCESS_SCAN_LIMIT=2048</code>、<code>WEB_PROCESS_MATCH_LIMIT=24</code> 和 <code>DIRECTORY_ENTRY_LIMIT=10000</code>。<code>ROOT_DEPTH=8</code> 和 <code>APPS_DEPTH=3</code> 是默认深度，可分别由 <code>--root-depth</code> 和 <code>--apps-depth</code> 覆盖。</dd>
+        <dt>进程和目录</dt><dd><code>PROCESS_SCAN_LIMIT=2048</code>、<code>WEB_PROCESS_MATCH_LIMIT=24</code>、<code>DIRECTORY_ENTRY_LIMIT=10000</code> 和 <code>DIRECTORY_WALK_LIMIT=1024</code>。一次最多评估 <code>JDK_INSTALLATION_LIMIT=256</code> 个不同的 JDK Home，每个 JDK 库目录的条目额度是 <code>JDK_LIBRARY_ENTRY_LIMIT=512</code>。<code>ROOT_DEPTH=8</code> 和 <code>APPS_DEPTH=3</code> 是默认深度，可分别由 <code>--root-depth</code> 和 <code>--apps-depth</code> 覆盖，最大 64 层。</dd>
         <dt>Web 文件读取</dt><dd><code>WEB_CONFIG_FILE_LIMIT=64</code>、<code>WEB_CONFIG_BYTE_LIMIT=65536</code> 和 <code>WEB_CONFIG_DIRECTORY_LIMIT=2048</code> 分别限制解析文件数、单文件字节数和目录枚举条目数。目录额度包含通配符未匹配的条目，截断会记入覆盖缺口。<code>NGINX_INCLUDE_DEPTH_LIMIT=8</code> 和 <code>APACHE_INCLUDE_DEPTH_LIMIT=8</code> 限制包含深度。<code>SCTP_CONFIG_FILE_LIMIT=128</code> 限制 SCTP 配置文件数。<code>WEB_BINARY_BYTE_LIMIT=16777216</code>、<code>APACHE_MAPS_BYTE_LIMIT=1048576</code> 和 <code>APACHE_MAPPED_MODULE_LIMIT=24</code> 限制二进制、Apache 进程映射和运行模块读取。</dd>
         <dt>Java 映射读取</dt><dd><code>JVM_MAPS_BYTE_LIMIT=8388608</code> 和 <code>JVM_MAPS_TOTAL_BYTE_LIMIT=67108864</code>。总额度包括每次重新核对身份的读取。达到任一上限时，Java 报告标记 <code>coverage.jvm_maps_limited</code>。</dd>
+        <dt>Java 版本与启动参数</dt><dd><code>JDK_RELEASE_BYTE_LIMIT=65536</code>、<code>JDK_RELEASE_FIELD_LIMIT=256</code> 和 <code>JVM_CMDLINE_BYTE_LIMIT=65536</code>。超限数据会略过。</dd>
+        <dt>NGINX 配置查找</dt><dd><code>WEB_CONFIG_LOOKUP_LIMIT=128</code> 限制整轮 include 查找和目录打开次数，同一个解析范围内的重复 include 复用已有结果。</dd>
         <dt>子命令时限</dt><dd><code>PACKAGE_QUERY_TIMEOUT=2</code>、<code>JCMD_TIMEOUT=3</code>、<code>JCMD_TOTAL_TIMEOUT=15</code> 和 <code>JAVA_VERSION_TIMEOUT=30</code>，单位为秒。单次命令收到超时终止信号后有 1 秒退出宽限。软件包查询需要 <code>timeout</code>，Java 版本和诊断查询也支持 <code>gtimeout</code>。</dd>
         <dt>子命令输出</dt><dd><code>PACKAGE_OUTPUT_BYTE_LIMIT=32768</code>、<code>JCMD_OUTPUT_BYTE_LIMIT=262144</code> 和 <code>JAVA_VERSION_OUTPUT_BYTE_LIMIT=65536</code>，单位为字节。超限的输出无效，显式 Java 版本查询会标记为未知。</dd>
       </dl>

@@ -58,7 +58,9 @@ jobs:
         run: node --test tests/ui-state.cjs
       - name: Test Bash host scanner
         if: runner.os == 'Linux'
-        run: bash tests/x2shell-check.sh
+        run: |
+          python3 scripts/generate-batch.py --check
+          bash tests/x2shell-check.sh
       - name: Build
         run: cargo build --release --locked --target "${{ matrix.target }}" -j 4
       - name: Smoke check native executable
@@ -81,9 +83,9 @@ jobs:
           retention-days: 14
       - name: Package public files
         run: python scripts/package-release.py --target "${{ matrix.target }}" --tag "$RELEASE_TAG" --output dist
-      - name: Stage the standalone Bash script
+      - name: Stage the Bash scripts
         if: runner.os == 'Linux'
-        run: cp scripts/x2shell-check.sh dist/x2shell-check.sh
+        run: cp scripts/x2shell-check.sh scripts/x2shell-batch.sh dist/
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}

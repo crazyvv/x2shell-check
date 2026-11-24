@@ -11,6 +11,10 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|p| p.join(name))
         .find(|p| {
+            #[cfg(target_os = "linux")]
+            if !crate::java_runtime_audit::MountPoints::host().allows_path_search(p) {
+                return false;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -327,6 +331,7 @@ pub async fn collect_with_options(options: &CollectOptions) -> Value {
                     "unreadable_maps",
                     "unstable_snapshots",
                     "unreadable_directories",
+                    "mounts_skipped",
                     "root_depth_truncated",
                 ]
                 .iter()

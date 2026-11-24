@@ -15,7 +15,7 @@
 
 ## 下载与运行
 
-Web 服务启动后，在扫描页打开「Bash 主机巡检」（`/tools`）即可下载随当前服务打包的 `x2shell-check.sh`。无参执行默认巡检 Java4Shell、Nginx2Root 和 Apache2Root。PHP 核验及网页导入使用 Rust 生成的主机报告。
+Web 服务启动后，在扫描页打开「Bash 主机巡检」（`/tools`）即可下载完整版 `x2shell-check.sh` 和独立批量版 `x2shell-batch.sh`。批量部署只需分发 `x2shell-batch.sh`，无参执行即可输出 Java4Shell、Nginx2Root 和 Apache2Root 的 JSON 报告。PHP 核验及网页导入使用 Rust 生成的主机报告。
 
 从 [GitHub Releases](https://github.com/crazyvv/x2shell-check/releases) 下载与系统匹配的程序包：Windows x86_64 使用 ZIP，Linux x86_64 使用 musl 静态构建的 tar.gz。解压后阅读 `START-HERE.txt`，使用同一 Release 的 `SHA256SUMS` 校验文件。
 
@@ -354,8 +354,10 @@ bash scripts/x2shell-check.sh --demo --json
 bash scripts/x2shell-check.sh
 
 # 批量采集用一个 JSON 对象，包含三类结果和专项退出码
-bash scripts/x2shell-check.sh --all --json
+bash scripts/x2shell-batch.sh
 ```
+
+批量版固定自动发现范围、JSON 输出和默认风险门禁。维护时编辑 `scripts/x2shell-check.sh`，再用 `python3 scripts/generate-batch.py` 生成批量版。目标机器运行脚本只需 Bash 和常见系统工具。
 
 在 macOS 上，Bash 仍会盘点可见的 Java 安装和启动器线索；依赖 Linux `/proc` 的 NGINX 与 Apache 主机专项会标记为不可采集。
 

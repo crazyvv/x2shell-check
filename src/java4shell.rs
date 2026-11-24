@@ -668,9 +668,18 @@ pub(crate) fn application_inventory(root: &Path, depth: usize) -> Value {
         ("gerrit", "Gerrit"),
         ("spinnaker", "Spinnaker"),
     ];
-    let mut pending = vec![(root.to_path_buf(), 0)];
-    let mut findings = Vec::new();
+    let Ok(root) = root.canonicalize() else {
+        return json!({"scope":"directory_name_hints","coverage_incomplete":true,"findings":[],"max_depth":depth});
+    };
+    #[cfg(target_os = "linux")]
+    let mounts = crate::java_runtime_audit::MountPoints::host();
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
+    let root_device = root.metadata().ok().map(|meta| meta.dev());
     let mut incomplete = !root.is_dir();
+    let mut pending = vec![(root, 0)];
+    let mut findings = Vec::new();
     let mut remaining = 4096;
     'scan: while let Some((path, level)) = pending.pop() {
         if level > 0 {
@@ -711,8 +720,22 @@ pub(crate) fn application_inventory(root: &Path, depth: usize) -> Value {
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
+            #[cfg(target_os = "linux")]
+            if mounts.contains(&entry.path()) {
+                incomplete = true;
+                continue;
+            }
             match entry.file_type() {
-                Ok(kind) if kind.is_dir() => pending.push((entry.path(), level + 1)),
+                Ok(kind) if kind.is_dir() => {
+                    #[cfg(unix)]
+                    if entry.path().symlink_metadata().ok().is_none_or(|meta| {
+                        !meta.is_dir() || Some(meta.dev()) != root_device
+                    }) {
+                        incomplete = true;
+                        continue;
+                    }
+                    pending.push((entry.path(), level + 1));
+                }
                 Ok(_) => {}
                 Err(_) => incomplete = true,
             }

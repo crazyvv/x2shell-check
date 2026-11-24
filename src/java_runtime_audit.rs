@@ -8,7 +8,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
     io::{self, BufRead, BufReader, Read},
-    os::unix::fs::MetadataExt,
+    os::unix::{
+        ffi::OsStringExt,
+        fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -204,7 +207,11 @@ fn small_file_with_limit(path: &Path, limit: u64) -> Option<String> {
     if !path.metadata().ok()?.is_file() {
         return None;
     }
-    let file = File::open(path).ok()?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
@@ -250,41 +257,117 @@ fn installation(scope: &Path, lib: &Path, id: FileId) -> Option<Installation> {
     })
 }
 
+#[derive(Default)]
+pub(crate) struct MountPoints(BTreeMap<PathBuf, bool>);
+
+impl MountPoints {
+    pub(crate) fn host() -> &'static Self {
+        static MOUNTS: std::sync::OnceLock<MountPoints> = std::sync::OnceLock::new();
+        MOUNTS.get_or_init(Self::read)
+    }
+
+    pub(crate) fn allows_path_search(&self, path: &Path) -> bool {
+        if !self.0.values().any(|&remote| remote) {
+            return true;
+        }
+        let Ok(candidate) = std::path::absolute(path) else {
+            return false;
+        };
+        !self.remote(&candidate)
+            && !fs::read_link(&candidate).is_ok_and(|target| {
+                candidate.parent().is_some_and(|parent| self.remote(&parent.join(target)))
+            })
+    }
+
+    pub(crate) fn read() -> Self {
+        const LIMIT: u64 = 2 * 1024 * 1024;
+        let mut data = Vec::new();
+        if File::open("/proc/self/mountinfo")
+            .and_then(|file| file.take(LIMIT + 1).read_to_end(&mut data))
+            .is_err()
+            || data.len() as u64 > LIMIT
+        {
+            return Self::default();
+        }
+        Self::parse(&data)
+    }
+
+    fn parse(data: &[u8]) -> Self {
+        let paths = data.split(|&byte| byte == b'\n').filter_map(|line| {
+            let mut fields = line.split(|&byte| byte == b' ');
+            let mut field = fields.nth(4)?;
+            let mut path = Vec::with_capacity(field.len());
+            while let Some((&first, rest)) = field.split_first() {
+                if first == b'\\'
+                    && rest.len() >= 3
+                    && rest[0] <= b'3'
+                    && rest[..3].iter().all(|byte| matches!(byte, b'0'..=b'7'))
+                {
+                    path.push((rest[0] - b'0') * 64 + (rest[1] - b'0') * 8 + (rest[2] - b'0'));
+                    field = &rest[3..];
+                } else {
+                    path.push(first);
+                    field = rest;
+                }
+            }
+            let kind = fields
+                .find(|&part| part == b"-")
+                .and_then(|_| fields.next())?;
+            let remote = matches!(
+                kind,
+                b"autofs"
+                    | b"nfs"
+                    | b"nfs4"
+                    | b"cifs"
+                    | b"smb3"
+                    | b"9p"
+                    | b"ceph"
+                    | b"glusterfs"
+                    | b"lustre"
+            ) || kind.starts_with(b"fuse.");
+            Some((PathBuf::from(std::ffi::OsString::from_vec(path)), remote))
+        });
+        Self(paths.collect())
+    }
+
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.0.contains_key(path)
+    }
+
+    fn remote(&self, path: &Path) -> bool {
+        path.ancestors().any(|part| self.0.get(part) == Some(&true))
+    }
+}
+
 fn installations(
     extra: &[PathBuf],
     homes: &[PathBuf],
     max_depth: usize,
-) -> (BTreeMap<PathBuf, Installation>, bool, usize, usize) {
+    mounts: &MountPoints,
+) -> (BTreeMap<PathBuf, Installation>, bool, usize, usize, usize) {
     let mut queue: VecDeque<_> = homes
         .iter()
         .chain(extra)
         .cloned()
-        .map(|p| (p, 0, true))
+        .map(|p| (p, 0, true, None))
         .chain(
             ROOTS
                 .into_iter()
                 .filter(|_| homes.is_empty())
-                .map(|p| (PathBuf::from(p), 0, false)),
+                .map(|p| (PathBuf::from(p), 0, false, None)),
         )
         .collect();
     let mut depth_boundaries = 0;
     let mut seen = BTreeSet::new();
     let mut found = BTreeMap::new();
     let mut unreadable = 0;
-    for home in std::env::var_os("JAVA_HOME")
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(
-            which("java")
-                .and_then(|p| p.canonicalize().ok())
-                .and_then(|p| Some(p.parent()?.parent()?.to_path_buf())),
-        )
-    {
-        if homes.is_empty() {
-            queue.push_front((home, 0, false));
-        }
-    }
     if homes.is_empty() {
+        let launcher = which("java")
+            .and_then(|p| p.canonicalize().ok())
+            .and_then(|p| Some(p.parent()?.parent()?.to_path_buf()));
+        for home in std::env::var_os("JAVA_HOME").map(PathBuf::from).into_iter().chain(launcher) {
+            queue.push_front((home, 0, false, None));
+        }
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let sdkman = std::env::var_os("SDKMAN_DIR")
             .map(PathBuf::from)
@@ -293,22 +376,53 @@ fn installations(
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|p| p.join(".gradle")));
         if let Some(path) = sdkman {
-            queue.push_front((path.join("candidates/java"), 0, false));
+            queue.push_front((path.join("candidates/java"), 0, false, None));
         }
         if let Some(path) = gradle {
-            queue.push_front((path.join("jdks"), 0, false));
+            queue.push_front((path.join("jdks"), 0, false, None));
         }
     }
     let mut budget = 30000;
-    while let Some((path, depth, explicit)) = queue.pop_front() {
+    let mut skipped_mounts = 0;
+    while let Some((path, depth, explicit, root_device)) = queue.pop_front() {
         if budget == 0 || found.len() >= 256 {
-            return (found, true, unreadable, depth_boundaries);
+            return (found, true, unreadable, depth_boundaries, skipped_mounts);
         }
         budget -= 1;
-        let Ok(path) = path.canonicalize() else {
-            unreadable += usize::from(explicit);
+        let Ok(path) = std::path::absolute(path) else {
+            unreadable += 1;
             continue;
         };
+        if (!explicit && mounts.remote(&path)) || (depth != 0 && mounts.contains(&path)) {
+            skipped_mounts += 1;
+            continue;
+        }
+        let path = if depth == 0 {
+            let Ok(real) = path.canonicalize() else {
+                unreadable += usize::from(explicit);
+                continue;
+            };
+            real
+        } else {
+            path
+        };
+        if (!explicit && mounts.remote(&path)) || (depth != 0 && mounts.contains(&path)) {
+            skipped_mounts += 1;
+            continue;
+        }
+        let Ok(meta) = path.symlink_metadata() else {
+            unreadable += 1;
+            continue;
+        };
+        if !meta.is_dir() {
+            unreadable += 1;
+            continue;
+        }
+        let device = meta.dev();
+        if root_device.is_some_and(|root| root != device) {
+            skipped_mounts += 1;
+            continue;
+        }
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -321,35 +435,46 @@ fn installations(
         };
         for entry in entries {
             if budget == 0 || found.len() >= 256 {
-                return (found, true, unreadable, depth_boundaries);
+                return (found, true, unreadable, depth_boundaries, skipped_mounts);
             }
             budget -= 1;
             let Ok(entry) = entry else {
                 unreadable += 1;
                 continue;
             };
+            if mounts.contains(&entry.path()) {
+                skipped_mounts += 1;
+                continue;
+            }
             let Ok(kind) = entry.file_type() else {
                 unreadable += 1;
                 continue;
             };
             if entry.file_name() == "libjvm.so" && (kind.is_file() || kind.is_symlink()) {
                 let lib = entry.path();
+                if kind.is_symlink()
+                    && fs::read_link(&lib).is_ok_and(|target| mounts.remote(&path.join(target)))
+                {
+                    skipped_mounts += 1;
+                    continue;
+                }
                 if let Ok(meta) = lib.metadata()
                     && meta.is_file()
+                    && meta.dev() == device
                     && let Some(item) = installation(Path::new("/"), &lib, file_id(&meta))
                 {
                     found.insert(lib, item);
                 }
             } else if kind.is_dir() {
                 if depth < max_depth {
-                    queue.push_back((entry.path(), depth + 1, explicit));
+                    queue.push_back((entry.path(), depth + 1, explicit, Some(device)));
                 } else if explicit {
                     depth_boundaries += 1;
                 }
             }
         }
     }
-    (found, false, unreadable, depth_boundaries)
+    (found, false, unreadable, depth_boundaries, skipped_mounts)
 }
 
 type Features = [bool; 4];
@@ -573,11 +698,16 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
         )
     };
     let depth = options.java_root_depth.unwrap_or(8);
-    let (disk, disk_budget_exhausted, unreadable_directories, depth_boundaries) =
+    let (disk, disk_budget_exhausted, unreadable_directories, depth_boundaries, skipped_mounts) =
         if options.java_processes_only {
-            (BTreeMap::new(), false, 0, 0)
+            (BTreeMap::new(), false, 0, 0, 0)
         } else {
-            installations(&options.java_root, &options.java_jdk, depth)
+            installations(
+                &options.java_root,
+                &options.java_jdk,
+                depth,
+                MountPoints::host(),
+            )
         };
     let mut package_scan = PackageScan::new(
         &small_file(Path::new("/etc/os-release")).unwrap_or_default(),
@@ -898,13 +1028,40 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
             "https://alas.aws.amazon.com/AL2027/ALAS2027-2026-374.html"],
         "coverage":{"proc_available":proc_available,"unreadable_maps":unreadable_maps,
             "unstable_snapshots":unstable_snapshots,"process_limit_reached":process_limit_reached,"maps_budget_exhausted":maps_budget.limited,"package_budget_exhausted":package_scan.limited,"disk_roots":if options.java_jdk.is_empty() && !options.java_processes_only { ROOTS.as_slice() } else { &[] },"explicit_jdk_homes":options.java_jdk,"extra_roots":options.java_root,"disk_max_depth":depth,"root_depth_truncated":depth_boundaries,"process_scan_enabled":!options.java_no_processes,
-            "disk_budget_exhausted":disk_budget_exhausted,"unreadable_directories":unreadable_directories},
+            "disk_budget_exhausted":disk_budget_exhausted,"unreadable_directories":unreadable_directories,"mounts_skipped":skipped_mounts},
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jdk_discovery_skips_nested_mounts_on_the_same_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let mount = dir.path().join("shared jdk");
+        for home in [dir.path().join("local"), mount.clone()] {
+            let server = home.join("lib/server");
+            fs::create_dir_all(&server).unwrap();
+            fs::write(server.join("libjvm.so"), b"fixture").unwrap();
+        }
+        let mountinfo = format!(
+            "42 1 8:1 / {} rw - ext4 /dev/test rw\n",
+            mount.to_string_lossy().replace(' ', "\\040")
+        );
+        let mounts = MountPoints::parse(mountinfo.as_bytes());
+        let (items, exhausted, unreadable, _, skipped) =
+            installations(&[], &[dir.path().to_owned()], 4, &mounts);
+        assert!(!exhausted);
+        assert_eq!(unreadable, 0);
+        assert_eq!(skipped, 1);
+        assert_eq!(items.len(), 1);
+        assert!(
+            items
+                .keys()
+                .all(|path| path.starts_with(dir.path().join("local")))
+        );
+    }
 
     #[test]
     fn repeated_mappings_use_the_same_byte_budget() {

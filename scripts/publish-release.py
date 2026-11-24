@@ -30,10 +30,11 @@ def main(tag, directory):
     archives = sorted(path for path in directory.iterdir() if path.name in expected)
     if {path.name for path in archives} != expected:
         raise RuntimeError("Both tested Windows and Linux archives are required")
-    script = directory / "x2shell-check.sh"
-    if not script.is_file() or script.read_bytes() != (ROOT / "scripts/x2shell-check.sh").read_bytes():
-        raise RuntimeError("The tested Bash attachment must match the tagged source")
-    files = archives + [script]
+    scripts = [directory / name for name in packaging.BASH_ASSETS]
+    for script in scripts:
+        if not script.is_file() or script.read_bytes() != (ROOT / "scripts" / script.name).read_bytes():
+            raise RuntimeError("The tested Bash attachment must match the tagged source: " + script.name)
+    files = archives + scripts
     hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
     sums = directory / "SHA256SUMS"
     sums.write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(hashes.items())), encoding="utf-8")
@@ -46,17 +47,19 @@ def main(tag, directory):
 | `x2shell-check-{tag}-windows-x86_64.zip` | Windows x86_64，网页服务和 URL 检查 |
 | `x2shell-check-{tag}-linux-x86_64.tar.gz` | Linux x86_64，musl 静态程序，含主机采集和 Bash 脚本 |
 | `x2shell-check.sh` | 独立 Bash 巡检脚本，可分发到目标主机 |
-| `SHA256SUMS` | 三个附件的 SHA-256 校验值 |
+| `x2shell-batch.sh` | 独立无参批量脚本，固定输出 JSON |
+| `SHA256SUMS` | 发布附件的 SHA-256 校验值 |
 
-解压程序包后阅读 `START-HERE.txt`。下载独立脚本后运行 `bash x2shell-check.sh`，默认检查 Java、NGINX 与 Apache。需要批量留档时运行 `bash x2shell-check.sh --all --json > host-audit.json`。
+解压程序包后阅读 `START-HERE.txt`。运行 `bash x2shell-check.sh` 可查看 Java、NGINX 与 Apache 巡检结果。批量留档时单独分发批量版，执行 `bash x2shell-batch.sh > host-audit.json`。
 
 扫描工作台按 Apache、NGINX、Java/JVM 和 PHP 展示各自证据。知识库按组件和 CVE 索引，`/tools` 提供 Bash 下载、批量用法及退出码说明。Linux 的 Rust `collect` 生成可导入网页的主机报告。
 
-## 变更日志（自 v0.8.11）
+## 变更日志（自 v0.8.12）
 
-- **Java PID 范围**。macOS 按 `--pid` 列表查询指定进程，缺失或不可核实的 PID 报告为证据不足。`--pid` 与 `--no-processes` 同时使用时返回 `2`。
-- **NGINX 配置取证**。同一次扫描中复用同一配置入口的解析结果。worker 在父进程、映像、根目录和挂载命名空间核验通过后，可关联 master 的配置参数。
-- **JSON 编码**。将路径和元数据中的非法 UTF-8 字节输出为替换字符，保留有效的 Unicode 内容。独立 Bash 脚本版本为 1.2.5。
+- **独立批量版**。固定自动发现、JSON 输出和默认门禁。从共享 Bash 源码剔除指定 PID、手工路径、JVM 诊断附加及其他专项参数代码。
+- **采集和交付**。Bash 和 Rust 都将报告交付纳入时限，区分写入失败和超时。Bash 在取消后由监督进程清理临时目录。
+- **资源预算**。限制重复 NGINX include、旧版 JDK 的 RPM 查询和元数据读取，目录遍历避开已识别的嵌套挂载。
+- **Java 厂商基线**。结合实际 JVM 库和运行构建核对已安装软件包，并发现 SDKMAN 与 Gradle 的常见 JDK。Bash 脚本版本为 1.2.6。
 
 源码提供可选的体积优化构建，执行 `cargo build --profile release-small --locked -j 4` 即可。下方平台附件使用标准 Release 配置。
 """, encoding="utf-8")
@@ -84,7 +87,7 @@ def main(tag, directory):
         command("gh", "release", "edit", tag, "--repo", repository, "--draft=false", "--latest")
     release = json.loads(command("gh", "release", "view", tag, "--repo", repository,
                                  "--json", "url,isDraft,assets,tagName,publishedAt").stdout)
-    if release["isDraft"] or not (expected | {"x2shell-check.sh", "SHA256SUMS"}).issubset({a["name"] for a in release["assets"]}):
+    if release["isDraft"] or not (expected | set(packaging.BASH_ASSETS) | {"SHA256SUMS"}).issubset({a["name"] for a in release["assets"]}):
         raise RuntimeError("Published release verification failed")
     status = {"state": "published", "tag": tag, "repository": repository,
               "source_commit": command("git", "rev-parse", "HEAD").stdout.strip(),

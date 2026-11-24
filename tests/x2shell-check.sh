@@ -197,7 +197,11 @@ if [[ $OS == Linux || $OS == Darwin ]]; then
 fi
 
 : > "$fixture/find-coverage"
-bounded_find 1 "$fixture/find-coverage" "$fixture/find-entries" "$fixture/entry-cap" -maxdepth 0
+(
+    coverage=$fixture/find-coverage
+    entries_remaining=1 dirs_remaining=1
+    walk_java_root "$fixture/entry-cap" 0 apps > "$fixture/find-entries"
+)
 [[ ! -s $fixture/find-coverage ]]
 
 rc=0
@@ -206,13 +210,27 @@ bash "$scanner" --quiet --no-processes --jdk "$fixture/jdk" --root "$fixture/roo
 [[ $rc == 3 ]]
 grep -Fq '"root_depth_boundaries": 1, "root_scan_errors": 0' "$fixture/report.json"
 
-printf '%s\n' '#!/bin/sh' 'exit 1' > "$fixture/tools/find"
-chmod +x "$fixture/tools/find"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$fixture/tools/ls"
+chmod +x "$fixture/tools/ls"
 rc=0
 PATH="$fixture/tools:$PATH" bash "$scanner" --quiet --no-processes --jdk "$fixture/jdk" \
     --root "$fixture/root" --json > "$fixture/report.json" || rc=$?
 [[ $rc == 3 ]]
 grep -Fq '"root_depth_boundaries": 0, "root_scan_errors": 1' "$fixture/report.json"
+rm -- "$fixture/tools/ls"
+
+mkdir -p "$fixture/release-fifo" "$fixture/release-large"
+mkfifo "$fixture/release-fifo/release"
+printf 'JAVA_VERSION="21.0.13.1+2"\n' > "$fixture/release-large/release"
+head -c "$JDK_RELEASE_BYTE_LIMIT" /dev/zero | tr '\000' X >> "$fixture/release-large/release"
+! release_snapshot "$fixture/release-fifo/release"
+! release_snapshot "$fixture/release-large/release"
+rc=0
+bash "$scanner" --java4shell --jdk "$fixture/release-fifo" --no-processes --json \
+    > "$fixture/release-fifo.json" 2> "$fixture/release-fifo.err" || rc=$?
+[[ $rc == 3 ]]
+grep -Fq 'release 元数据缺失、不可读、并非普通文件或超过读取上限' "$fixture/release-fifo.json"
+! grep -Fq '"scan_timed_out":true' "$fixture/release-fifo.json"
 
 rc=0
 bash "$scanner" --demo --fail-on candidate >/dev/null 2>&1 || rc=$?
@@ -310,6 +328,7 @@ rc=0
 (
     SCAN_TIMEOUT=1
     main() {
+        mkfifo "$SCAN_WORK/status"
         printf '{"partial":'
         trap '' TERM
         sleep 10 &
@@ -324,6 +343,47 @@ grep -Fq '"status":"timeout","coverage":{"scan_timed_out":true' "$fixture/watchd
 if child_state=$(ps -o state= -p "$(cat "$fixture/watchdog-child")"); then
     [[ $child_state == Z* ]]
 fi
+
+if [[ $OS == Linux ]]; then
+    rc=0
+    bash -c 'trap "" XFSZ; ulimit -f 1; exec bash "$1" --demo --json' fixture "$scanner" \
+        > "$fixture/spool-error.json" 2> "$fixture/spool-error.err" || rc=$?
+    [[ $rc == 2 && ! -s $fixture/spool-error.json ]]
+fi
+
+(
+    mkdir "$fixture/batch"
+    batch=$fixture/batch/x2shell-batch.sh
+    cp "$repo/scripts/x2shell-batch.sh" "$batch"
+    bash -n "$batch"
+    ! grep -Eq -- '--(jcmd|pid|jdk|root|nginx-path|apache-path|nginx-config|apache-config|apps|cpuinfo|java-path|demo|out|csv|java-package-details)([^[:alnum:]_-]|$)' "$batch"
+
+    for scanner_profile in "$scanner" "$batch"; do
+        rc=0
+        profile_args=()
+        if [[ $scanner_profile == "$scanner" ]]; then profile_args=(--all --json); fi
+        bash -c '
+            source "$1"
+            shift
+            java4shell_main() { printf "{\"component\":\"java\"}"; return 1; }
+            nginx2root_scan() { printf "{\"component\":\"nginx\"}"; return 3; }
+            apache_inventory() { printf "{\"component\":\"apache\"}"; }
+            run_scan "$@"
+        ' fixture "$scanner_profile" ${profile_args[@]+"${profile_args[@]}"} \
+            > "$fixture/batch-${scanner_profile##*/}.json" || rc=$?
+        [[ $rc == 1 ]]
+    done
+    cmp "$fixture/batch-x2shell-check.sh.json" "$fixture/batch-x2shell-batch.sh.json"
+
+    rc=0
+    bash "$batch" --jcmd 2> "$fixture/batch-extra.err" || rc=$?
+    [[ $rc == 2 ]]
+    rc=0
+    (cd "$fixture/batch" && bash ./x2shell-batch.sh) > "$fixture/standalone-batch.json" || rc=$?
+    [[ $rc == 0 || $rc == 1 || $rc == 3 ]]
+    grep -q '"scope":"local_read_only_inventory"' "$fixture/standalone-batch.json"
+    grep -q '"exit_codes":{' "$fixture/standalone-batch.json"
+)
 
 mkfifo "$fixture/cpu-fifo"
 rc=0
@@ -661,10 +721,22 @@ RPM
             export PATH="$fixture/package-tools:$PATH"
             export X2_RPM_STARTED="$fixture/rpm-started" X2_RPM_FINISHED="$fixture/rpm-finished"
             PACKAGE_QUERY_TIMEOUT=1
+            java_pkg_attempts=0 java_pkg_deadline= java_pkg_limited=false
             ! installation_rpm_metadata "$fixture/rpm-jdk"
             [[ -e $X2_RPM_STARTED && ! -e $X2_RPM_FINISHED ]]
         ) 2> "$fixture/rpm-timeout.err"
     fi
+
+    (
+        mkdir -p "$fixture/rpm-budget-jdk/lib"/{a,b,c}
+        touch "$fixture/rpm-budget-jdk/lib"/{a,b,c}/libjvm.so
+        JAVA_PACKAGE_LOOKUP_LIMIT=2
+        java_pkg_attempts=0 java_pkg_deadline= java_pkg_limited=false
+        have() { return 0; }
+        java_pkg_command() { printf 'query\n' >> "$fixture/rpm-budget-log"; return 1; }
+        ! installation_rpm_metadata "$fixture/rpm-budget-jdk"
+        [[ $java_pkg_limited == true && $(wc -l < "$fixture/rpm-budget-log") -eq 2 ]]
+    )
 
     (
         mkdir -p "$fixture/shared-config-procs"
@@ -689,6 +761,12 @@ RPM
         linux_process_visibility_limited() { return 1; }
         java_process_start() { printf '123'; }
         web_package_hint() { :; }
+        head() {
+            if [[ $1 == -c && $2 == "$WEB_BINARY_BYTE_LIMIT" && $4 == "$fixture"/shared-config-procs/*/exe ]]; then
+                printf 'read\n' >> "$fixture/nginx-binary-reads"
+            fi
+            command head "$@"
+        }
         nginx2root_config() {
             printf '%s\n' "${1:-defaults}" >> "$fixture/nginx-config-reads"
             printf '{"files_examined":1,"skipped":0,"http2_on":true}'
@@ -697,6 +775,7 @@ RPM
         nginx2root_scan --json > "$fixture/nginx-shared-config.json" || rc=$?
         [[ $rc == 1 ]]
         [[ $(grep -Fxc "$fixture/shared-nginx.conf" "$fixture/nginx-config-reads") == 1 ]]
+        [[ $(wc -l < "$fixture/nginx-binary-reads") -eq 1 ]]
         [[ $(grep -Fo '"configuration_entry_source":"parent_process_argument"' "$fixture/nginx-shared-config.json" | wc -l) -eq 2 ]]
 
         printf 'PPid:\t999\n' > "$fixture/shared-config-procs/103/status"

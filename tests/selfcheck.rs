@@ -1726,26 +1726,21 @@ async fn host_tools_page_serves_the_bundled_bash_scanner() {
             .await
             .unwrap();
         assert_eq!(page.status(), 200);
-        assert!(
-            page.text()
-                .await
-                .unwrap()
-                .contains("/downloads/x2shell-check.sh")
-        );
+        let page = page.text().await.unwrap();
+        assert!(page.contains("/downloads/x2shell-check.sh"));
+        assert!(page.contains("/downloads/x2shell-batch.sh"));
     }
-    let script = client
-        .get(format!("{}/downloads/x2shell-check.sh", p.base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(script.status(), 200);
-    assert_eq!(script.headers()["content-type"], "application/octet-stream");
-    assert_eq!(
-        script.headers()["content-disposition"],
-        "attachment; filename=\"x2shell-check.sh\""
-    );
-    assert_eq!(
-        script.bytes().await.unwrap().as_ref(),
-        include_bytes!("../scripts/x2shell-check.sh").as_slice()
-    );
+    for (name, expected_bytes) in [
+        ("x2shell-check.sh", include_bytes!("../scripts/x2shell-check.sh").as_slice()),
+        ("x2shell-batch.sh", include_bytes!("../scripts/x2shell-batch.sh").as_slice()),
+    ] {
+        let script = client.get(format!("{}/downloads/{name}", p.base)).send().await.unwrap();
+        assert_eq!(script.status(), 200);
+        assert_eq!(script.headers()["content-type"], "application/octet-stream");
+        assert_eq!(
+            script.headers()["content-disposition"].to_str().unwrap(),
+            format!("attachment; filename=\"{name}\"")
+        );
+        assert_eq!(script.bytes().await.unwrap().as_ref(), expected_bytes);
+    }
 }

@@ -295,6 +295,118 @@ fn java_command_limits_report_complete_json_and_stop_helpers() {
     }
     assert!(!active(), "helper still running after scan timeout");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn collect_stops_helpers_when_the_supervisor_is_killed() {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        process::{Command, Stdio},
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let launcher = dir.path().join("java");
+    let marker = dir.path().join("worker-and-helper");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\nsleep 10 &\nprintf '%s %s\\n' \"$PPID\" \"$!\" > \"$WATCHDOG_TEST_MARKER\"\nwait\n",
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_x2shell-check"))
+        .args(["collect", "--scan-timeout", "20", "--java-path"])
+        .arg(&launcher)
+        .env("WATCHDOG_TEST_MARKER", &marker)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let ids = loop {
+        if let Ok(line) = fs::read_to_string(&marker) {
+            let ids = line.split_whitespace().collect::<Vec<_>>();
+            if ids.len() == 2 {
+                break ids.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = supervisor.kill();
+            let _ = supervisor.wait();
+            panic!("fixture launcher did not start");
+        }
+        sleep(Duration::from_millis(10));
+    };
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+    let active = |id: &str| {
+        fs::read_to_string(format!("/proc/{id}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')').is_some_and(|(_, fields)| {
+                !matches!(fields.split_whitespace().next(), Some("Z" | "X"))
+            })
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while ids.iter().any(|id| active(id)) && Instant::now() < deadline {
+        sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ids.iter().all(|id| !active(id)),
+        "collector group is still running"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn collector_bounds_a_stalled_report_pipe_and_reports_write_errors() {
+    use std::{
+        fs,
+        os::fd::AsRawFd,
+        process::{Command, Stdio},
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let jdk = dir.path().join("jdk-".repeat(30));
+    let executable = env!("CARGO_BIN_EXE_x2shell-check");
+    fs::create_dir_all(jdk.join("lib/server")).unwrap();
+    fs::write(jdk.join("lib/server/libjvm.so"), b"fixture").unwrap();
+    fs::write(jdk.join("release"), "JAVA_VERSION=\"21.0.13.1+2\"\n").unwrap();
+    let options = dir.path().join("options.json");
+    // Keep enough ordinary data in the report to fill even a one-page pipe.
+    fs::write(&options, serde_json::json!({
+        "java_command": true, "java_no_processes": true,
+        "java_jdk": vec![&jdk; 12],
+    }).to_string()).unwrap();
+    let command = || {
+        let mut command = Command::new(executable);
+        command.args(["collect", "--scan-timeout", "2", "--options"])
+            .arg(&options).env("PATH", "");
+        command
+    };
+    let mut child = command().stdout(Stdio::piped()).spawn().unwrap();
+    let pipe = child.stdout.as_ref().unwrap().as_raw_fd();
+    assert!(unsafe { libc::fcntl(pipe, libc::F_SETPIPE_SZ, 4096) } > 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("collector waited for the report consumer after its deadline");
+        }
+        sleep(Duration::from_millis(10));
+    };
+    assert_eq!(result.code(), Some(3));
+
+    let full = fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let status = command().stdout(full).status().unwrap();
+    assert_eq!(status.code(), Some(2));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn java_installed_package_requires_matching_runtime_build() {

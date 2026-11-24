@@ -14,6 +14,7 @@ TARGETS = {
     "x86_64-unknown-linux-musl": ("linux-x86_64", "x2shell-check", ".tar.gz"),
     "x86_64-pc-windows-msvc": ("windows-x86_64", "x2shell-check.exe", ".zip"),
 }
+BASH_ASSETS = ("x2shell-check.sh", "x2shell-batch.sh")
 FILES = ["README.md", "THIRD_PARTY_NOTICES.md", "config.open.example.json",
          "collector.options.example.json", "fingerprints.example.json", "nginx.conf.example"]
 
@@ -46,7 +47,8 @@ def package(target, tag, output):
             shutil.copytree(ROOT / subdir, directory / subdir)
         if platform.startswith("linux-"):
             (directory / "scripts").mkdir()
-            shutil.copy2(ROOT / "scripts/x2shell-check.sh", directory / "scripts/x2shell-check.sh")
+            for filename in BASH_ASSETS:
+                shutil.copy2(ROOT / "scripts" / filename, directory / "scripts" / filename)
         prefix = ".\\x2shell-check.exe" if "windows" in target else "./x2shell-check"
         (directory / "START-HERE.txt").write_text(
             f"x2shell-check · 服务暴露面自查台 {tag} / {platform}\n\n"

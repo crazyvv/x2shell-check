@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# @full-begin
 # =============================================================================
 #  x2shell-check.sh — Java、NGINX 与 Apache 主机暴露面自查
 #  单文件 · 只读 · 无 Python/Go 依赖（仅 bash + coreutils/grep/awk）
@@ -31,13 +32,14 @@
 #          2 参数/IO 错误；3 无门禁命中且证据不足或覆盖不完整。
 # =============================================================================
 
+# @full-end
 set -u
 
 CVE="CVE-2026-114938"
 NICKNAME="Java4Shell"
 RULES_AS_OF="2026-11-24"
 PROG=${0##*/}
-SCRIPT_VERSION="1.2.5"
+SCRIPT_VERSION="1.2.6"
 
 OS=$(uname -s 2>/dev/null || echo unknown)
 ARCH_RAW=$(uname -m 2>/dev/null || echo unknown)
@@ -48,10 +50,17 @@ ARCH_NORM=$(printf '%s' "$ARCH_RAW" | tr '[:upper:]' '[:lower:]')
 SCAN_TIMEOUT=120               # 整次巡检超时（秒），终止扫描进程组
 PROCESS_SCAN_LIMIT=2048         # 每个专项最多检查的进程记录数
 WEB_PROCESS_MATCH_LIMIT=24      # NGINX 和 Apache 各自深入检查的匹配进程数
-DIRECTORY_ENTRY_LIMIT=10000     # Java --root 合计与 --apps 各自的目录条目上限
+# @full-begin
+DIRECTORY_ENTRY_LIMIT=10000     # 默认 JDK 发现与 --root 共用；--apps 单独计算
+# @full-end
+# @batch DIRECTORY_ENTRY_LIMIT=10000     # 默认 JDK 发现的目录条目预算
+DIRECTORY_WALK_LIMIT=1024       # 每轮目录遍历最多打开的目录数
+JDK_INSTALLATION_LIMIT=256     # 单轮最多评估的不同 JDK Home
+JDK_LIBRARY_ENTRY_LIMIT=512    # 单个 JDK 的 lib/jre/lib 布局条目上限
 WEB_CONFIG_FILE_LIMIT=64        # 单次配置解析最多检查的文件数
 WEB_CONFIG_BYTE_LIMIT=65536      # 单个 Web 配置文件的读取上限
 WEB_CONFIG_DIRECTORY_LIMIT=2048 # 单次 Web 配置解析最多枚举的目录条目（含未匹配项）
+WEB_CONFIG_LOOKUP_LIMIT=128    # 单轮 NGINX 解析最多解析的 include 和打开的目录次数
 SCTP_CONFIG_FILE_LIMIT=128      # SCTP 模块配置线索最多检查的文件数
 APACHE_INCLUDE_DEPTH_LIMIT=8    # Apache Include 最大递归深度
 NGINX_INCLUDE_DEPTH_LIMIT=8     # NGINX include 最大递归深度
@@ -64,47 +73,108 @@ JAVA_PACKAGE_LOOKUP_LIMIT=12   # 单轮最多核验的不同 JVM 库文件
 JAVA_PACKAGE_TOTAL_TIMEOUT=8   # Java 软件包查询累计秒数
 PACKAGE_QUERY_TIMEOUT=2        # 单次软件包查询超时（秒）
 PACKAGE_OUTPUT_BYTE_LIMIT=32768 # 单次软件包查询输出上限
+# @full-begin
 JCMD_TIMEOUT=3                 # 单次 JVM 诊断超时（秒）
+# @full-end
+# @full-begin
 JCMD_TOTAL_TIMEOUT=15          # 本次 JVM 诊断的累计时间预算（秒）
+# @full-end
+# @full-begin
 JCMD_OUTPUT_BYTE_LIMIT=262144  # 单次 JVM 诊断输出上限
+# @full-end
+JDK_RELEASE_BYTE_LIMIT=65536    # 单份 JDK release 元数据的字节上限
+JDK_RELEASE_FIELD_LIMIT=256     # release 单字段的字节上限
+JVM_CMDLINE_BYTE_LIMIT=65536    # 单个 JVM 启动参数的字节上限
+# @full-begin
 CPUINFO_BYTE_LIMIT=1048576      # 离线 CPU 信息文件读取上限
+# @full-end
+# @full-begin
 JAVA_VERSION_TIMEOUT=30        # 显式 Java 启动器版本查询超时（秒）
+# @full-end
+# @full-begin
 JAVA_VERSION_OUTPUT_BYTE_LIMIT=65536 # Java 启动器版本输出上限
+# @full-end
+# @full-begin
 ROOT_DEPTH=8                   # --root 默认搜索深度，可由 --root-depth 覆盖
+# @full-end
+# @batch ROOT_DEPTH=8                   # JSON 兼容字段，与完整版默认值一致
+# @full-begin
 APPS_DEPTH=3                   # --apps 默认搜索深度，可由 --apps-depth 覆盖
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 默认参数
 # ---------------------------------------------------------------------------
+# @full-begin
 FORMAT=""
+# @full-end
+# @full-begin
 OUT=""
+# @full-end
+# @full-begin
 DETAILS=0
+# @full-end
+# @full-begin
 DEMO=0
+# @full-end
+# @full-begin
 NO_PROC=0
+# @full-end
+# @full-begin
 PROC_ONLY=0
+# @full-end
+# @full-begin
 QUIET=0
+# @full-end
+# @batch QUIET=1
+# @full-begin
 CPUINFO=""
+# @full-end
+# @full-begin
 APPS_DIR=""
+# @full-end
 FAIL_ON="affected,potential"
+# @full-begin
 ASSUME_FEFF=0
+# @full-end
+# @full-begin
 JCMD=0
+# @full-end
+# @full-begin
 JAVA_DEFAULT_FLAGS=0
+# @full-end
+# @full-begin
 JAVA_PKG_DETAILS=0
+# @full-end
 PROCESS_LIMIT_REACHED=false
 PROCESS_VISIBILITY_LIMITED=false
 JVM_MAPS_LIMITED=false
 ROOT_ENTRY_LIMIT_REACHED=false
+# @full-begin
 APPS_ENTRY_LIMIT_REACHED=false
+# @full-end
+# @full-begin
 APPS_SCAN_ERRORS=0
+# @full-end
+# @full-begin
 JDK_ARGS=()
+# @full-end
+# @full-begin
 PID_ARGS=()
+# @full-end
+# @full-begin
 JAVA_BINS=()
+# @full-end
+# @full-begin
 ROOT_ARGS=()
+# @full-end
 
 WORK=""
 FIND_FILE=""
 WARN_FILE=""
+# @full-begin
 APP_FILE=""
+# @full-end
 ACTIVE_FILE=""
 CPU_STATE="unknown"
 CPU_SOURCE=""
@@ -120,6 +190,7 @@ REQ_FEATURES="avx512f avx512bw avx512vbmi bmi2"
 # ---------------------------------------------------------------------------
 # 帮助
 # ---------------------------------------------------------------------------
+# @full-begin
 usage() {
 cat <<EOF
 Java4Shell / Nginx2Root / Apache2Root 主机暴露面检测（$PROG v$SCRIPT_VERSION）
@@ -194,6 +265,7 @@ Java4Shell / Nginx2Root / Apache2Root 主机暴露面检测（$PROG v$SCRIPT_VER
           Corretto 对应 17.0.21.1.2 / 21.0.13.1.2 / 25.0.5.1.2 / 27.0.1.1.4
 EOF
 }
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 基础工具
@@ -231,7 +303,7 @@ note_progress() { [ "$QUIET" -eq 1 ] || printf '[i] %s\n' "$*" >&2; }
 
 # 追加一条采集提示（写文件，跨子 shell 安全）
 warn() {
-    printf '%s\n' "$*" >> "$WARN_FILE"
+    printf '%s\n' "$*" >> "$WARN_FILE" || die "写入巡检提示失败"
 }
 
 # 把可能破坏 TSV 的字符压平
@@ -344,6 +416,7 @@ cpu_probe_darwin() {
 }
 
 cpu_probe() {
+# @full-begin
     local raw sample size
     if [ -n "$CPUINFO" ]; then
         [ -f "$CPUINFO" ] && [ -r "$CPUINFO" ] || die "--cpuinfo 需要可读的普通文件: $CPUINFO"
@@ -355,6 +428,9 @@ cpu_probe() {
         raw=$(cpu_from_text < "$sample") || die "--cpuinfo 无法解析: $CPUINFO"
         CPU_SOURCE=$CPUINFO
     elif [ -r /proc/cpuinfo ] && grep -q . /proc/cpuinfo 2>/dev/null; then
+# @full-end
+# @batch     local raw
+# @batch     if [ -r /proc/cpuinfo ] && grep -q . /proc/cpuinfo 2>/dev/null; then
         raw=$(cpu_from_text < /proc/cpuinfo)
         CPU_SOURCE=/proc/cpuinfo
     elif [ "$OS" = "Darwin" ] && have sysctl; then
@@ -398,18 +474,30 @@ cpu_assess() {
 # ---------------------------------------------------------------------------
 # JDK release 元数据
 # ---------------------------------------------------------------------------
-release_is_jdk() {
-    local f=$1
-    [ -f "$f" ] || return 1
-    grep -q '^JAVA_VERSION=' "$f" 2>/dev/null && return 0
-    grep -q '^JAVA_RUNTIME_VERSION=' "$f" 2>/dev/null && return 0
-    return 1
+release_snapshot() {
+    local file=$1 data LC_ALL=C
+    [[ -f $file && -r $file ]] || return 1
+    # GNU dd also makes the open nonblocking if the path is replaced with a FIFO.
+    if [[ ${RELEASE_NONBLOCK:-false} == true ]]; then
+        data=$(dd if="$file" iflag=nonblock,fullblock bs="$((JDK_RELEASE_BYTE_LIMIT + 1))" count=1 2>/dev/null && printf .) || return 1
+    else
+        data=$(head -c "$((JDK_RELEASE_BYTE_LIMIT + 1))" -- "$file" 2>/dev/null && printf .) || return 1
+    fi
+    data=${data%.}
+    (( ${#data} <= JDK_RELEASE_BYTE_LIMIT )) || return 1
+    printf '%s' "$data"
 }
 
-release_get() {
-    local f=$1 key=$2
-    [ -r "$f" ] || return 0
-    awk -v k="$key" '
+release_is_jdk() {
+    local data
+    data=$(release_snapshot "$1") || return 1
+    [[ $'\n'$data == *$'\n'JAVA_VERSION=* || $'\n'$data == *$'\n'JAVA_RUNTIME_VERSION=* ]]
+}
+
+release_value() {
+    local data=$1 key=$2
+    [ -n "$data" ] || return 0
+    LC_ALL=C awk -v k="$key" -v limit="$JDK_RELEASE_FIELD_LIMIT" '
         {
             line = $0
             sub(/\r$/, "", line)
@@ -420,15 +508,21 @@ release_get() {
             gsub(/^[ \t]+|[ \t]+$/, "", key)
             gsub(/^[ \t]+|[ \t]+$/, "", val)
             gsub(/^"|"$/, "", val)
-            if (key == k) { print val; exit }
-        }' "$f" 2>/dev/null
+            if (key == k) { if (length(val) <= limit) print val; exit }
+        }' <<< "$data" 2>/dev/null
+}
+
+release_get() {
+    local data
+    data=$(release_snapshot "$1") || return 0
+    release_value "$data" "$2"
 }
 
 # 旧版 JRE 仅在父目录确有可读 release 时归一化，避免丢失独立 JRE 的文件证据。
 normalize_java_root() {
     local root=${1%/}
-    if [ "${root##*/}" = "jre" ] && [ ! -r "$root/release" ] &&
-       [ -r "${root%/*}/release" ]; then
+    if [[ ${root##*/} == jre && ( ! -f $root/release || ! -r $root/release ) &&
+          -f ${root%/*}/release && -r ${root%/*}/release ]]; then
         root=${root%/*}
     fi
     printf '%s' "$root"
@@ -445,14 +539,14 @@ java_root_of() {
 # 不执行 java，不根据目录名称推测；仅供磁盘安装清点，不能证明进程运行版本。
 installation_rpm_metadata() {
     local root=$1 file row name version vendor pattern
+    rpm_meta=
     have rpm && have timeout || return 1
     pattern='^1\.8\.0\.([0-9]+)\.b([0-9]+)$'
-    for file in "$root"/lib/libjvm.so "$root"/lib/*/libjvm.so \
-        "$root"/lib/*/*/libjvm.so "$root"/jre/lib/*/libjvm.so \
-        "$root"/jre/lib/*/*/libjvm.so "$root/bin/java" "$root/jre/bin/java"; do
+    while IFS= read -r -d '' file; do
         [ -f "$file" ] || continue
+        java_pkg_reserve || return 1
         file=$(real_path "$(resolve_symlinks "$file")")
-        row=$(bounded_command timeout "$PACKAGE_QUERY_TIMEOUT" "$PACKAGE_OUTPUT_BYTE_LIMIT" rpm -qf --qf '%{NAME}\t%{VERSION}\t%{VENDOR}\n' -- "$file" 2>/dev/null) || continue
+        row=$(java_pkg_command rpm -qf --qf '%{NAME}\t%{VERSION}\t%{VENDOR}\n' -- "$file") || continue
         # 多包归属或非预期包名不作为确定版本证据。
         [[ $row != *$'\n'* ]] || continue
         IFS=$'\t' read -r name version vendor <<< "$row"
@@ -460,9 +554,9 @@ installation_rpm_metadata() {
         [[ $version =~ $pattern ]] || continue
         version="1.8.0_${BASH_REMATCH[1]}-b${BASH_REMATCH[2]}"
         # RPM 的包名明确标识 OpenJDK；保留真实厂商，不伪造发行商信息。
-        printf '%s\t%s\t%s\t%s' "$version" "$vendor" "$name" "$file"
+        printf -v rpm_meta '%s\t%s\t%s\t%s' "$version" "$vendor" "$name" "$file"
         return 0
-    done
+    done < <(jdk_library_files "$root"; printf '%s\0' "$root/bin/java" "$root/jre/bin/java" 2>/dev/null || :)
     return 1
 }
 
@@ -534,6 +628,15 @@ rpm	rocky	9	java-25-openjdk	1:25.0.5.1.2-1.1.el9	https://dl.rockylinux.org/pub/r
 JAVA_PACKAGE_RULES
 }
 
+java_pkg_reserve() {
+    java_pkg_deadline=${java_pkg_deadline:-$((SECONDS + JAVA_PACKAGE_TOTAL_TIMEOUT))}
+    if (( java_pkg_attempts >= JAVA_PACKAGE_LOOKUP_LIMIT || SECONDS >= java_pkg_deadline )); then
+        java_pkg_limited=true
+        return 1
+    fi
+    java_pkg_attempts=$((java_pkg_attempts + 1))
+}
+
 java_pkg_command() {
     local limiter seconds=$PACKAGE_QUERY_TIMEOUT
     limiter=$(type -P timeout || type -P gtimeout) || return 1
@@ -579,6 +682,7 @@ java_pkg_compare() {
     esac
 }
 
+# @full-begin
 java_apt_details() {
     local name=$1 out versions changelog size mentions=null
     if out=$(java_pkg_command apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison "$name"); then
@@ -600,6 +704,7 @@ java_apt_details() {
     fi
     printf ',"local_changelog_mentions_cve":%s' "$mentions"
 }
+# @full-end
 
 java_package_probe() {
     local path=$1 distro=$2 branch=$3 manager data name source version owned owner sv installed vendor srpm
@@ -644,7 +749,9 @@ java_package_probe() {
     if [[ -n $reference ]]; then
         patch=$(java_pkg_compare "$manager" "$version" "$reference")
     fi
+# @full-begin
     if [[ $manager == dpkg && $JAVA_PKG_DETAILS == 1 ]]; then details=$(java_apt_details "$name"); fi
+# @full-end
     printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' "$manager" "$name" "$version" "$reference" "$advisory" "${patch:-unknown}" "$details"
 }
 
@@ -661,9 +768,7 @@ java_package_evidence() {
         [[ ${java_pkg_keys[idx]} != "$key" ]] || break
     done
     if ((idx == java_pkg_count)); then
-        if ((java_pkg_count >= JAVA_PACKAGE_LOOKUP_LIMIT)); then java_pkg_limited=true; return 0; fi
-        java_pkg_deadline=${java_pkg_deadline:-$((SECONDS + JAVA_PACKAGE_TOTAL_TIMEOUT))}
-        if ((SECONDS >= java_pkg_deadline)); then java_pkg_limited=true; return 0; fi
+        java_pkg_reserve || return 0
         data=$(java_package_probe "$path" "$JAVA_PKG_DISTRO" "$JAVA_PKG_BRANCH") || data=
         java_pkg_keys[idx]=$key
         java_pkg_results[idx]=$data
@@ -711,70 +816,183 @@ java_name() {
 
 # 列出待盘点的 JDK Home
 # 从 .../lib/server/libjvm.so 反推运行时根目录（不含 /proc 前缀）
+# @full-begin
 root_of_lib() { jvm_root_from_lib "" "$1"; }
+# @full-end
 
-# Stream a bounded number of entries. Counting all entries also bounds wide
-# trees containing no matching files. Stop find as soon as the pipe closes.
-bounded_find() {
-    local limit=$1 coverage=$2 output=$3 entry count=0
-    local -a statuses
-    shift 3
-    if find "$@" -print0 2>/dev/null | (
-        while IFS= read -r -d '' entry; do
-            if (( count >= limit )); then
-                printf 'entry_limit\n' >> "$coverage"
-                break
-            fi
-            printf '%s\0' "$entry" || exit 1
-            count=$((count + 1))
-        done
-    ) > "$output"; then
-        statuses=("${PIPESTATUS[@]}")
-    else
-        statuses=("${PIPESTATUS[@]}")
-    fi
-    if (( statuses[1] != 0 || (statuses[0] != 0 && statuses[0] != 141) )); then
-        printf 'error\n' >> "$coverage"
+# One unsorted directory stream at a time. GNU find can enumerate a whole
+# directory before its downstream consumer sees the first entry.
+directory_entries() {
+    LC_ALL=C ls -1fb -- "$1" 2>/dev/null || printf '\n'
+}
+
+directory_device() {
+    if [[ $OS == Darwin ]]; then stat -Lf '%d' "$1" 2>/dev/null
+    else stat -Lc '%d' -- "$1" 2>/dev/null
     fi
 }
 
-# --root：在给定目录里找嵌入式运行时的 libjvm.so，反推 Home
-scan_root_dirs() {
-    local r entry home relative separators remaining=$DIRECTORY_ENTRY_LIMIT
-    [ ${#ROOT_ARGS[@]} -gt 0 ] || return 0
-    for r in "${ROOT_ARGS[@]}"; do
-        if ! have find || [ ! -d "$r" ]; then
-            printf 'error\n' >> "$ROOT_COVERAGE_FILE"
-            warn "无法搜索安装目录: $r"
-            continue
+# Decode only the kernel's mountinfo fields. Quoted keys preserve path boundaries.
+java_mount_snapshot() {
+    local id parent dev root mount options tail path key filesystem
+    [[ $OS == Linux && -r /proc/self/mountinfo ]] || return 0
+    while IFS=' ' read -r id parent dev root mount options tail; do
+        [[ -n $mount && " $tail" == *" - "* ]] || continue
+        printf -v path '%b' "$mount"
+        printf -v key '%q' "$path"
+        java_mounts+="$key"$'\n'
+        filesystem=${tail##* - }
+        filesystem=${filesystem#- }
+        case ${filesystem%% *} in
+            autofs|nfs|nfs4|cifs|smb3|9p|ceph|glusterfs|lustre|fuse|fuse.*)
+                java_remote_mounts+="$key"$'\n' ;;
+        esac
+    done < <(head -c 2097152 /proc/self/mountinfo)
+}
+
+java_path_on_remote_mount() {
+    local path=$1 key
+    [[ -n ${java_remote_mounts:-} && $java_remote_mounts != $'\n' ]] || return 1
+    [[ $path == /* ]] || path=$PWD/$path
+    while :; do
+        printf -v key '%q' "$path"
+        [[ $java_remote_mounts != *$'\n'"$key"$'\n'* ]] || return 0
+        [[ $path != / ]] || return 1
+        path=${path%/*}
+        path=${path:-/}
+    done
+}
+
+java_default_directory() {
+    if java_path_on_remote_mount "$1"; then
+        printf 'mount_skipped\n' >> "$coverage"
+        return 1
+    fi
+    [[ -d $1 ]]
+}
+
+java_disk_launcher() {
+    local search=${PATH:-}: dir file target
+    while [[ $search == *:* ]]; do
+        dir=${search%%:*}; search=${search#*:}
+        file=${dir:-.}/java
+        if java_path_on_remote_mount "$file"; then continue; fi
+        if [[ -L $file ]]; then
+            target=$(readlink -- "$file" 2>/dev/null) || continue
+            if [[ $target != /* ]]; then target=${file%/*}/$target; fi
+            if java_path_on_remote_mount "$target"; then continue; fi
         fi
+        if [[ -f $file && -x $file ]]; then printf '%s' "$file"; return; fi
+    done
+    return 1
+}
+
+walk_java_tree() {
+    local path=$1 depth=$2 entry name child device mount_key
+    if (( entries_remaining <= 0 || dirs_remaining <= 0 )); then
+        printf 'entry_limit\n' >> "$coverage"
+        return 1
+    fi
+    entries_remaining=$((entries_remaining - 1))
+    if (( depth > 0 )); then
+        device=$(directory_device "$path") || { printf 'error\n' >> "$coverage"; return 0; }
+        [[ $device == "$root_device" ]] || { printf 'mount_skipped\n' >> "$coverage"; return 0; }
+    fi
+    case $kind in
+        discover)
+            if (( depth > 0 )) && release_is_jdk "$path/release"; then jdk_root_record "$path"; fi ;;
+        discover_mac)
+            if (( depth == 3 )) && [[ $path == */Contents/Home ]] &&
+                    release_is_jdk "$path/release"; then jdk_root_record "$path"; fi ;;
+# @full-begin
+        apps) printf '%s\0' "$path" ;;
+# @full-end
+# @full-begin
+        root) if (( depth == max_depth )); then printf 'boundary\n' >> "$coverage"; fi ;;
+# @full-end
+    esac
+    (( depth < max_depth )) || return 0
+    dirs_remaining=$((dirs_remaining - 1))
+    while IFS= read -r entry; do
+        [[ -n $entry ]] || { printf 'error\n' >> "$coverage"; return 0; }
+        printf -v name '%b' "${entry//\\ / }"
+        [[ $name != . && $name != .. ]] || continue
+        if (( entries_remaining <= 0 )); then
+            printf 'entry_limit\n' >> "$coverage"
+            return 1
+        fi
+        child=${path%/}/$name
+        printf -v mount_key '%q' "$child"
+        if [[ ${java_mounts:-} == *$'\n'"$mount_key"$'\n'* ]]; then
+            printf 'mount_skipped\n' >> "$coverage"
+            entries_remaining=$((entries_remaining - 1))
+# @full-begin
+        elif [[ ( $kind == apps || $kind == discover || $kind == discover_mac ) && $name == .* ]]; then
+# @full-end
+# @batch         elif [[ ( $kind == discover || $kind == discover_mac ) && $name == .* ]]; then
+            entries_remaining=$((entries_remaining - 1))
+        elif [[ ! -L $child && -d $child ]]; then
+            walk_java_tree "$child" "$((depth + 1))" || return 1
+        else
+            entries_remaining=$((entries_remaining - 1))
+# @full-begin
+            if [[ ( $kind == root || $kind == library ) && $name == libjvm.so ]]; then
+# @full-end
+# @batch             if [[ $kind == library && $name == libjvm.so ]]; then
+                printf '%s\0' "$child"
+            fi
+            if [[ $kind == discover && -L $child && -d $child ]] && release_is_jdk "$child/release"; then
+                jdk_root_record "$child"
+            fi
+            if [[ $kind == discover_mac && $depth == 0 && -L $child ]] &&
+                    release_is_jdk "$child/Contents/Home/release"; then
+                jdk_root_record "$child/Contents/Home"
+            fi
+        fi
+    done < <(directory_entries "$path" | head -n "$((entries_remaining + 3))")
+    return 0
+}
+
+walk_java_root() {
+    local path=$1 max_depth=$2 kind=$3 root_device
+    (( entries_remaining > 0 && dirs_remaining > 0 )) || { printf 'entry_limit\n' >> "$coverage"; return 1; }
+    root_device=$(directory_device "$path") || { printf 'error\n' >> "$coverage"; return 0; }
+    walk_java_tree "$path" 0
+}
+
+jdk_library_files() {
+    local home=$1 tree coverage=${ROOT_COVERAGE_FILE:-/dev/null}
+    local entries_remaining=$JDK_LIBRARY_ENTRY_LIMIT dirs_remaining=$DIRECTORY_WALK_LIMIT
+    for tree in "$home/lib" "$home/jre/lib"; do
+        [[ -d $tree ]] || continue
+        walk_java_root "$tree" 3 library || break
+    done
+}
+
+# @full-begin
+# --root：在给定目录里找嵌入式运行时的 libjvm.so，反推 Home
+# @full-end
+# @full-begin
+scan_root_dirs() {
+    local r entry home complete
+    for r in ${ROOT_ARGS[@]+"${ROOT_ARGS[@]}"}; do
         if ! r=$(CDPATH= cd -P -- "$r" && printf '%s.' "$PWD"); then
-            printf 'error\n' >> "$ROOT_COVERAGE_FILE"
+            printf 'error\n' >> "$coverage"
             continue
         fi
         r=${r%.}
-        bounded_find "$remaining" "$ROOT_COVERAGE_FILE" "$WORK/root-entries" \
-            "$r" -xdev -maxdepth "$ROOT_DEPTH"
+        complete=true
+        walk_java_root "$r" "$((10#$ROOT_DEPTH))" root > "$WORK/root-entries" || complete=false
         while IFS= read -r -d '' entry; do
-            remaining=$((remaining - 1))
-            if [ -d "$entry" ] && [ ! -L "$entry" ]; then
-                relative=${entry#"${r%/}/"}
-                separators=${relative//[^\/]/}
-                if { [ "$entry" = "$r" ] && [ "$ROOT_DEPTH" -eq 0 ]; } ||
-                   { [ "$entry" != "$r" ] && [ "$((${#separators} + 1))" -eq "$ROOT_DEPTH" ]; }; then
-                    printf 'boundary\n' >> "$ROOT_COVERAGE_FILE"
-                fi
-                continue
-            fi
-            [[ ${entry##*/} == libjvm.so && ( -f "$entry" || -L "$entry" ) ]] || continue
+            [[ -f $entry || -L $entry ]] || continue
             home=$(root_of_lib "$entry"; printf '.')
             home=${home%.}
-            [ -n "$home" ] && [ -d "$home" ] || continue
-            jdk_root_record "$home"
+            [[ -n $home && -d $home ]] && jdk_root_record "$home"
         done < "$WORK/root-entries"
-        if grep -qx entry_limit "$ROOT_COVERAGE_FILE"; then break; fi
+        [[ $complete == true ]] || break
     done
 }
+# @full-end
 
 # Record each path with a NUL delimiter, including names containing newlines.
 jdk_root_record() (
@@ -785,7 +1003,9 @@ jdk_root_record() (
 )
 
 list_roots() {
-    local d j pat f
+    local d j coverage=$ROOT_COVERAGE_FILE
+    local entries_remaining=$DIRECTORY_ENTRY_LIMIT dirs_remaining=$DIRECTORY_WALK_LIMIT
+# @full-begin
     if [ ${#JDK_ARGS[@]} -gt 0 ]; then
         for d in ${JDK_ARGS[@]+"${JDK_ARGS[@]}"}; do
             [ -n "$d" ] || continue
@@ -795,44 +1015,41 @@ list_roots() {
         return
     fi
 
-    if [ -n "${JAVA_HOME:-}" ] && [ -d "${JAVA_HOME:-}" ]; then
+# @full-end
+    if [ -n "${JAVA_HOME:-}" ] && java_default_directory "$JAVA_HOME"; then
         jdk_root_record "$JAVA_HOME"
     fi
 
-    if j=$(command -v java 2>/dev/null); then
+    if j=$(java_disk_launcher); then
         j=$(resolve_symlinks "$j")
-        if [ "$OS" != "Darwin" ] || [ "$j" != "/usr/bin/java" ]; then
+        if [ "$OS" != Darwin ] || [ "$j" != /usr/bin/java ]; then
             jdk_root_record "$(java_root_of "$j")"
         fi
     fi
 
     if [[ -n ${HOME:-} ]]; then
-        for f in "${SDKMAN_DIR:-$HOME/.sdkman}"/candidates/java/*/release             "${GRADLE_USER_HOME:-$HOME/.gradle}"/jdks/*/release             "${GRADLE_USER_HOME:-$HOME/.gradle}"/jdks/*/*/release; do
-            [ -f "$f" ] && release_is_jdk "$f" && jdk_root_record "${f%/*}"
-        done
+        d=${SDKMAN_DIR:-$HOME/.sdkman}/candidates/java
+        if java_default_directory "$d"; then walk_java_root "$d" 1 discover || return 0; fi
+        d=${GRADLE_USER_HOME:-$HOME/.gradle}/jdks
+        if java_default_directory "$d"; then walk_java_root "$d" 2 discover || return 0; fi
     fi
 
     case $OS in
         Darwin)
-            pat="/Library/Java/JavaVirtualMachines/*/Contents/Home/release"
-            [ -n "${HOME:-}" ] && pat="$pat $HOME/Library/Java/JavaVirtualMachines/*/Contents/Home/release"
-            ;;
+            d=/Library/Java/JavaVirtualMachines
+            if [[ -d $d ]]; then walk_java_root "$d" 3 discover_mac || return 0; fi
+            d=${HOME:-}/Library/Java/JavaVirtualMachines
+            if [[ -n ${HOME:-} && -d $d ]]; then walk_java_root "$d" 3 discover_mac || return 0; fi ;;
         Linux)
-            pat="/usr/lib/jvm/*/release /usr/lib64/jvm/*/release /usr/java/*/release \
-/opt/java/*/release /opt/jdk*/release /opt/*/release /usr/local/*/release /usr/local/java/*/release"
-            ;;
-        *)
-            pat=""
-            ;;
+            for d in /usr/lib/jvm /usr/lib64/jvm /usr/java /opt/java /opt /usr/local /usr/local/java; do
+                java_default_directory "$d" || continue
+                walk_java_root "$d" 1 discover || return 0
+            done ;;
     esac
 
-    for f in $pat; do
-        [ -f "$f" ] || continue
-        release_is_jdk "$f" || continue
-        jdk_root_record "${f%/*}"
-    done
-
+# @full-begin
     scan_root_dirs
+# @full-end
 }
 
 # ---------------------------------------------------------------------------
@@ -1087,6 +1304,7 @@ build_assess() {
 # 缓解参数
 #   多次出现按最后一个生效；-XX:UseAVX<=2 视为已缓解
 # ---------------------------------------------------------------------------
+# @full-begin
 flag_assessment() {
     local base64=$1 avx=$2
     if [[ $base64 == false || $avx =~ ^0*[0-2]$ ]]; then
@@ -1097,7 +1315,9 @@ flag_assessment() {
         printf 'unknown'
     fi
 }
+# @full-end
 
+# @full-begin
 launcher_flag_assessment() {
     local flags=${1:-} flag base64=unknown avx=unknown
     for flag in $flags; do
@@ -1109,10 +1329,13 @@ launcher_flag_assessment() {
     done
     flag_assessment "$base64" "$avx"
 }
+# @full-end
 
+# @full-begin
 mitigation_from_flags() {
     [[ $(launcher_flag_assessment "${1:-}") == mitigated ]]
 }
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 状态合成
@@ -1205,7 +1428,7 @@ emit_finding() {
         "$id" "$kind" "$status" "$reason" "$build" "$bevid" "$cpu" "$version" \
         "$jhome" "$vendor" "$product" "$vm" "$arch" "$flags" "$feff" "$container" "$notes" \
         "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build" "$package_json" "$flag_probe_json" \
-        >> "$FIND_FILE"
+        >> "$FIND_FILE" || die "写入巡检发现失败"
 }
 
 add_note() { NOTES="${NOTES:+$NOTES | }$1"; }
@@ -1224,15 +1447,16 @@ file_id() {
 }
 
 jdk_product() {
-    local home=$1 vendor=$2 label graal edition
+    local home=$1 vendor=$2 label graal edition release_data=${3-}
     case $(lower "$vendor") in
         openjdk) printf 'OpenJDK' ;;
         oracle|"oracle corporation")
-            graal=$(release_get "$home/release" GRAALVM_VERSION)
-            edition=$(lower "$(release_get "$home/release" GRAALVM_EDITION)")
+            (( $# >= 3 )) || release_data=$(release_snapshot "$home/release") || release_data=
+            graal=$(release_value "$release_data" GRAALVM_VERSION)
+            edition=$(lower "$(release_value "$release_data" GRAALVM_EDITION)")
             label=$(lower "$(printf '%s %s %s' "$edition" \
-                "$(release_get "$home/release" IMPLEMENTOR_VERSION)" \
-                "$(release_get "$home/release" JAVA_RUNTIME_NAME)")")
+                "$(release_value "$release_data" IMPLEMENTOR_VERSION)" \
+                "$(release_value "$release_data" JAVA_RUNTIME_NAME)")")
             case "$label" in
                 *"enterprise edition"*|*"graalvm enterprise"*)
                     printf 'Oracle GraalVM Enterprise Edition'
@@ -1259,11 +1483,12 @@ jdk_product() {
 }
 
 assess_jdk_build() {
-    local home=$1 version=$2 vendor=$3 product=$4 vm=$5 distribution="" graal=""
+    local home=$1 version=$2 vendor=$3 product=$4 vm=$5 distribution="" graal="" release_data=${6-}
     if [ -n "$home" ]; then
-        distribution=$(release_get "$home/release" IMPLEMENTOR_VERSION)
+        (( $# >= 6 )) || release_data=$(release_snapshot "$home/release") || release_data=
+        distribution=$(release_value "$release_data" IMPLEMENTOR_VERSION)
         if [ "$product" = "Oracle GraalVM Enterprise Edition" ]; then
-            graal=$(release_get "$home/release" GRAALVM_VERSION)
+            graal=$(release_value "$release_data" GRAALVM_VERSION)
             local graal_pattern='^[0-9]+(\.[0-9]+){1,4}$'
             if [[ $graal =~ $graal_pattern ]]; then
                 version=$graal
@@ -1277,41 +1502,46 @@ scan_installations() {
     local root version vendor product vm arch notes build cpu status mit flags feff vmname vmtext openj9
     local bevid reason bevid_and_build lib lib_id matched rpm_meta rpm_name rpm_file
 
-    local seen_roots=$'\n' root_key pkg_lib pkg_id java_package_json java_package_applies
+    local release_data seen_roots=$'\n' scanned=0 root_key pkg_lib pkg_id java_package_json java_package_applies
     while LC_ALL=C IFS= read -r -d '' root; do
         [ -n "$root" ] || continue
         printf -v root_key '%q' "$root"
         [[ $seen_roots != *$'\n'"$root_key"$'\n'* ]] || continue
+        if (( scanned >= JDK_INSTALLATION_LIMIT )); then
+            printf 'entry_limit\n' >> "$ROOT_COVERAGE_FILE"
+            break
+        fi
+        scanned=$((scanned + 1))
         seen_roots+="$root_key"$'\n'
         matched=0 pkg_lib= pkg_id=
-        for lib in "$root"/lib/libjvm.so "$root"/lib/*/libjvm.so                    "$root"/lib/*/*/libjvm.so "$root"/jre/lib/*/libjvm.so "$root"/jre/lib/*/*/libjvm.so; do
+        while IFS= read -r -d '' lib; do
             [ -f "$lib" ] || continue
             lib_id=$(file_id "$lib") || continue
             if [[ -z $pkg_id ]]; then pkg_lib=$lib pkg_id=$lib_id
             elif [[ $pkg_id != "$lib_id" ]]; then pkg_lib=; fi
             if grep -Fxq -- "$lib_id" "$ACTIVE_FILE"; then matched=1; break; fi
-        done
+        done < <(jdk_library_files "$root")
         [ "$matched" -eq 0 ] || continue
         NOTES=""
         version=""; vendor=""; product=""; vm=""; arch=""; vmname=""
         build="unknown"; bevid=""
 
-        if [ -r "$root/release" ]; then
-            version=$(release_get "$root/release" JAVA_RUNTIME_VERSION)
-            [ -n "$version" ] || version=$(release_get "$root/release" JAVA_VERSION)
-            vendor=$(release_get "$root/release" IMPLEMENTOR)
-            vm=$(release_get "$root/release" JVM_VARIANT)
-            vmname=$(release_get "$root/release" JAVA_VM_NAME)
-            arch=$(release_get "$root/release" OS_ARCH)
+        if release_data=$(release_snapshot "$root/release"); then
+            version=$(release_value "$release_data" JAVA_RUNTIME_VERSION)
+            [ -n "$version" ] || version=$(release_value "$release_data" JAVA_VERSION)
+            vendor=$(release_value "$release_data" IMPLEMENTOR)
+            vm=$(release_value "$release_data" JVM_VARIANT)
+            vmname=$(release_value "$release_data" JAVA_VM_NAME)
+            arch=$(release_value "$release_data" OS_ARCH)
             [ -n "$version" ] || add_note "release 文件中没有 JAVA_VERSION/JAVA_RUNTIME_VERSION"
         else
-            add_note "缺少 release 元数据（可能不是完整 JDK Home，或为嵌入式 JRE）"
+            add_note "release 元数据缺失、不可读、并非普通文件或超过读取上限"
         fi
 
-        product=$(jdk_product "$root" "$vendor")
+        product=$(jdk_product "$root" "$vendor" "$release_data")
         # 老版 CentOS/RHEL OpenJDK 8 可无 release，按实际文件的 RPM 归属补充磁盘版本。
         if [ -z "$version" ]; then
-            rpm_meta=$(installation_rpm_metadata "$root") || rpm_meta=""
+            installation_rpm_metadata "$root" || rpm_meta=""
             if [ -n "$rpm_meta" ]; then
                 IFS=$'\t' read -r version vendor rpm_name rpm_file <<< "$rpm_meta"
                 product="OpenJDK"
@@ -1327,7 +1557,7 @@ scan_installations() {
         fi
 
         cpu=$(cpu_assess "$arch" "$CPU_STATE")
-        bevid_and_build=$(assess_jdk_build "$root" "$version" "$vendor" "$product" "$vm")
+        bevid_and_build=$(assess_jdk_build "$root" "$version" "$vendor" "$product" "$vm" "$release_data")
         build=$(printf '%s' "$bevid_and_build" | cut -f1)
         bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
 
@@ -1423,6 +1653,7 @@ mapping_identity() {
     printf 'map_files'
 }
 
+# @full-begin
 jcmd_version() {
     local pid=$1 jc=$2 out
     out=$(run_jcmd "$jc" "$pid" VM.version 2>/dev/null) || return 1
@@ -1443,7 +1674,9 @@ jcmd_version() {
         }
     '
 }
+# @full-end
 
+# @full-begin
 runtime_version_conflicts() {
     local runtime=$1 disk=$2
     [[ $runtime == *+* && -n $disk ]] || return 1
@@ -1453,12 +1686,16 @@ runtime_version_conflicts() {
         [[ ${runtime%%+*} != "$disk" ]]
     fi
 }
+# @full-end
 
+# @full-begin
 jcmd_bin() {
     type -P jcmd || :
 }
+# @full-end
 
 # JVM 是否注册了 SIGQUIT 处理器（attach 监听器的前提）
+# @full-begin
 handles_sigquit() {
     local f=$1/status mask
     [ -r "$f" ] || return 1
@@ -1470,8 +1707,12 @@ handles_sigquit() {
     esac
     [ $(( 16#${mask: -1} & 4 )) -ne 0 ]
 }
+# @full-end
 
+# @full-begin
 # 用 jcmd 读真实生效 flags，输出 "UseBASE64Intrinsics UseAVX"（未知为 unknown）
+# @full-end
+# @full-begin
 jcmd_flags() {
     local pid=$1 jc=$2 out="" b64="" avx=""
     out=$(run_jcmd "$jc" "$pid" VM.flags -all 2>/dev/null) || return 1
@@ -1481,7 +1722,9 @@ jcmd_flags() {
     [ -n "$b64" ] || [ -n "$avx" ] || return 1
     printf '%s %s\n' "${b64:-unknown}" "${avx:-unknown}"
 }
+# @full-end
 
+# @full-begin
 run_jcmd() (
     local limiter seconds=$JCMD_TIMEOUT
     limiter=$(type -P timeout || type -P gtimeout) || return 1
@@ -1492,6 +1735,7 @@ run_jcmd() (
     unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS
     bounded_command "$limiter" "$seconds" "$JCMD_OUTPUT_BYTE_LIMIT" "$@"
 )
+# @full-end
 
 jvm_root_from_lib() {
     local proc=$1 lib=$2 server libdir root
@@ -1534,11 +1778,15 @@ container_hint() {
 
 # 从 cmdline 提取启动参数（跳过 -cp/-jar 等及其值）
 launcher_flags() {
-    local f=$1 arg i=1 n out="" args=()
-    [ -r "$f" ] || { printf ''; return; }
+    local f=$1 arg i=1 n out="" bytes=0 LC_ALL=C args=()
+    [ -r "$f" ] || return 0
     while IFS= read -r -d '' arg; do
+        bytes=$((bytes + ${#arg} + 1))
+        (( bytes <= JVM_CMDLINE_BYTE_LIMIT )) || return 0
         args[${#args[@]}]="$arg"
-    done < "$f" 2>/dev/null
+    done < <(head -c "$((JVM_CMDLINE_BYTE_LIMIT + 1))" -- "$f" 2>/dev/null)
+    # A partial final argument or unreadable input supplies no trustworthy estimate.
+    [[ -z $arg ]] || return 0
     n=${#args[@]}
     while [ "$i" -lt "$n" ]; do
         arg=${args[$i]}
@@ -1563,20 +1811,36 @@ launcher_flags() {
 }
 
 scan_processes() {
+# @full-begin
     local pid proc exe exe_clean comm named has_jvm maps_ok explicit=0
+# @full-end
+# @batch     local pid proc exe exe_clean comm named has_jvm maps_ok
     local libmeta libpath libdev libino st mhex nhex verified range expected identity_source identity_rc
     local root root_disp version vendor product vm arch build bevid cpu status reason
     local flags feff mit fn notes container start1 start2
+# @full-begin
     local measured_state assumed_state b64 eavx reported_version
+# @full-end
+# @full-begin
     local bevid_and_build verify_problem libmeta2 libmeta3 jc jcf vmname vmtext
+# @full-end
+# @batch     local bevid_and_build verify_problem libmeta2 libmeta3 vmname vmtext
+# @full-begin
     local runtime_version disk_version version_conflict weak_identity
+# @full-end
+# @batch     local disk_version weak_identity
     local identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build
 
-    local scanned=0 jcmd_deadline= java_package_json java_package_applies
+# @full-begin
+    local release_data scanned=0 jcmd_deadline= java_package_json java_package_applies
+# @full-end
+# @batch     local release_data scanned=0 java_package_json java_package_applies
     local host_mount host_root
     host_mount=$(readlink /proc/self/ns/mnt 2>/dev/null || :)
     host_root=$(file_id / || :)
+# @full-begin
     if [ ${#PID_ARGS[@]} -gt 0 ]; then explicit=1; fi
+# @full-end
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
         if (( scanned >= PROCESS_SCAN_LIMIT )); then PROCESS_LIMIT_REACHED=true; break; fi
@@ -1585,11 +1849,13 @@ scan_processes() {
         NOTES=""
 
         if [ ! -d "$proc" ]; then
+# @full-begin
             if [ "$explicit" -eq 1 ]; then
                 emit_finding "pid:$pid" "process" "unknown" \
                     "进程不存在或已退出，未采集到任何证据。" "unknown" "进程不存在" \
                     "$(cpu_assess "$ARCH_RAW" "$CPU_STATE")" "" "" "" "" "" "$ARCH_RAW" "" "false" "" ""
             fi
+# @full-end
             continue
         fi
 
@@ -1608,12 +1874,18 @@ scan_processes() {
             maps_ok=0
             if [ -d "$proc" ]; then LIMITED_PROCS=$((LIMITED_PROCS + 1)); fi
         fi
+# @full-begin
         if (( named || has_jvm || !maps_ok || explicit )); then
+# @full-end
+# @batch         if (( named || has_jvm || !maps_ok )); then
             exe=$(readlink "$proc/exe" 2>/dev/null || :)
             exe_clean=${exe% (deleted)}
             java_name "$exe_clean" && named=1
         fi
+# @full-begin
         if [ "$maps_ok" -eq 0 ] && { [ "$explicit" -eq 1 ] || [ "$named" -eq 1 ]; }; then
+# @full-end
+# @batch         if [ "$maps_ok" -eq 0 ] && [ "$named" -eq 1 ]; then
             emit_finding "pid:$pid" "process" "unknown" "无法读取进程映射，无法核实运行中 JVM。" \
                 "unknown" "进程映射不可读" "$(cpu_assess "$ARCH_RAW" "$CPU_STATE")" \
                 "" "" "" "" "" "$ARCH_RAW" "" "false" "" ""
@@ -1621,20 +1893,26 @@ scan_processes() {
         fi
 
         if [ "$named" -eq 0 ] && [ "$has_jvm" -eq 0 ]; then
+# @full-begin
             if [ "$explicit" -eq 1 ]; then
                 emit_finding "pid:$pid" "process" "unknown" \
                     "该 PID 既不是 Java 启动器，也未映射 HotSpot 库，无法判定。" "unknown" "非 Java 进程" \
                     "$(cpu_assess "$ARCH_RAW" "$CPU_STATE")" "" "" "" "" "" "$ARCH_RAW" "" "false" "" ""
             fi
+# @full-end
             continue
         fi
 
         # File identity and JVM version evidence have independent lifetimes.
         verified=0
         weak_identity=0
+# @full-begin
         version_conflict=0
+# @full-end
         identity_source=""
+# @full-begin
         runtime_version=""
+# @full-end
         disk_version=""
         root=""
         libpath=""
@@ -1673,14 +1951,15 @@ scan_processes() {
         fi
 
         version=""; vendor=""; product=""; vm=""; arch=""
-        if [ -n "$root" ] && [ -r "$root/release" ]; then
-            version=$(release_get "$root/release" JAVA_RUNTIME_VERSION)
-            [ -n "$version" ] || version=$(release_get "$root/release" JAVA_VERSION)
-            vendor=$(release_get "$root/release" IMPLEMENTOR)
-            vm=$(release_get "$root/release" JVM_VARIANT)
-            vmname=$(release_get "$root/release" JAVA_VM_NAME)
-            arch=$(release_get "$root/release" OS_ARCH)
-            product=$(jdk_product "$root" "$vendor")
+        release_data=
+        if [ -n "$root" ] && release_data=$(release_snapshot "$root/release"); then
+            version=$(release_value "$release_data" JAVA_RUNTIME_VERSION)
+            [ -n "$version" ] || version=$(release_value "$release_data" JAVA_VERSION)
+            vendor=$(release_value "$release_data" IMPLEMENTOR)
+            vm=$(release_value "$release_data" JVM_VARIANT)
+            vmname=$(release_value "$release_data" JAVA_VM_NAME)
+            arch=$(release_value "$release_data" OS_ARCH)
+            product=$(jdk_product "$root" "$vendor" "$release_data")
             disk_version=$version
             if [ "$weak_identity" -eq 1 ]; then
                 add_note "未关联的磁盘 release 构建: ${disk_version:-未知}"
@@ -1723,6 +2002,7 @@ scan_processes() {
         fi
         feff="false"
         if [ -n "$flags" ]; then
+# @full-begin
             # 启动参数是可信的"启动证据"，但 JVM 有效值仍需按实际进程确认
             if [ "$ASSUME_FEFF" -eq 1 ]; then
                 add_note "启动参数: ${flags}（已请求按启动参数估算，jcmd 实测优先）"
@@ -1774,10 +2054,16 @@ scan_processes() {
             fi
         fi
 
+# @full-end
+# @batch             add_note "启动参数: ${flags}（启动证据，未确认该 JVM 的有效值）"
+# @batch         fi
         container=$(container_hint "$proc")
 
         java_package_json= java_package_applies=false
+# @full-begin
         if [[ $verified == 1 && $version_conflict == 0 && -n $host_mount && -n $host_root &&
+# @full-end
+# @batch         if [[ $verified == 1 && -n $host_mount && -n $host_root &&
               $(readlink "$proc/ns/mnt" 2>/dev/null) == "$host_mount" &&
               $(file_id "$proc/root") == "$host_root" ]]; then
             java_package_evidence "$libpath" "$st" "$version"
@@ -1796,12 +2082,15 @@ scan_processes() {
             continue
         fi
 
+# @full-begin
         if [ "$verified" -eq 1 ] && [ "$version_conflict" -eq 0 ]; then
+# @full-end
+# @batch         if [ "$verified" -eq 1 ]; then
             printf '%s\n' "$st" >> "$ACTIVE_FILE"
         fi
 
         cpu=$(cpu_assess "$arch" "$CPU_STATE")
-        bevid_and_build=$(assess_jdk_build "$root" "$version" "$vendor" "$product" "$vm")
+        bevid_and_build=$(assess_jdk_build "$root" "$version" "$vendor" "$product" "$vm" "$release_data")
         build=$(printf '%s' "$bevid_and_build" | cut -f1)
         bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
         [ -n "$build" ] || build="unknown"
@@ -1815,6 +2104,7 @@ scan_processes() {
 
         fn=0
         mit=0
+# @full-begin
         case $measured_state in
             mitigated) fn=1; mit=1 ;;
             unmitigated) fn=1 ;;
@@ -1830,16 +2120,21 @@ scan_processes() {
                     fi
                 fi ;;
         esac
+# @full-end
         identity_confidence=strong
         [ "$weak_identity" -eq 0 ] || identity_confidence=weak
         disk_hint_version="" disk_hint_vendor="" disk_hint_product="" disk_hint_build=""
+# @full-begin
         if [ "$weak_identity" -eq 1 ] || [ "$version_conflict" -eq 1 ]; then
+# @full-end
+# @batch         if [ "$weak_identity" -eq 1 ]; then
             disk_hint_version=$disk_version
             disk_hint_vendor=$vendor
             disk_hint_product=$product
             disk_hint_build=$build
         fi
 
+# @full-begin
         if [ "$version_conflict" -eq 1 ]; then
             status=unknown
             reason="jcmd 自报运行构建与磁盘 release 不一致"
@@ -1848,6 +2143,8 @@ scan_processes() {
             version=$runtime_version
             vendor="" product="" vm=""
         elif [ "$weak_identity" -eq 1 ]; then
+# @full-end
+# @batch         if [ "$weak_identity" -eq 1 ]; then
             status=potential
             reason="运行库身份未核实：inode 相同、设备号不同，磁盘构建仅供参考"
             if [ "$disk_hint_build" = unfixed ]; then
@@ -1855,6 +2152,7 @@ scan_processes() {
             fi
             build=candidate
             bevid=$reason
+# @full-begin
             if [ -n "$runtime_version" ]; then
                 version=$runtime_version
                 vendor="" product=""
@@ -1863,6 +2161,10 @@ scan_processes() {
                 vendor=$disk_hint_vendor
                 product=$disk_hint_product
             fi
+# @full-end
+# @batch             version=$disk_hint_version
+# @batch             vendor=$disk_hint_vendor
+# @batch             product=$disk_hint_product
             vm=""
         elif [ "$openj9" -eq 1 ]; then
             build="outside_scope"
@@ -1873,10 +2175,12 @@ scan_processes() {
         else
             status=$(classify "$build" "$cpu" "$mit" "$fn" "$(norm_arch "$arch")")
             reason=$(make_reason "$status" "$build" "$bevid" "$cpu" "$mit" "$(norm_arch "$arch")")
+# @full-begin
             case "$status:$assumed_state" in
                 mitigated:mitigated) reason="按显式信任的 JVM 启动参数估算为已缓解，尚无 jcmd 实测。" ;;
                 affected:unmitigated) reason="按显式信任的 JVM 启动参数估算为受影响，尚无 jcmd 实测。" ;;
             esac
+# @full-end
         fi
 
         emit_finding "pid:$pid" "process" "$status" "$reason" "$build" "$bevid" \
@@ -1884,22 +2188,30 @@ scan_processes() {
             "$flags" "$feff" "$container" "$NOTES" \
             "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build" "$java_package_json"
     done < <(
+# @full-begin
         if [ "$explicit" -eq 1 ]; then
             printf '%s\n' ${PID_ARGS[@]+"${PID_ARGS[@]}"}
         else
             web_process_paths | while IFS= read -r proc; do printf '%s\n' "${proc#/proc/}"; done
         fi
+# @full-end
+# @batch         web_process_paths | while IFS= read -r proc; do printf '%s\n' "${proc#/proc/}"; done
     )
 }
 
 # 非 Linux 平台：仅能做启动器级别的线索（Go 版在 macOS 上同样不校验运行库）
 scan_processes_other() {
-    local pid exe root notes version vendor product vm arch cpu build bevid status reason bevid_and_build
+    local release_data pid exe root notes version vendor product vm arch cpu build bevid status reason bevid_and_build
+# @full-begin
     local scanned=0 explicit=0 selected selected_pid process_list
+# @full-end
+# @batch     local scanned=0 process_list
+# @full-begin
     if [ ${#PID_ARGS[@]} -gt 0 ]; then
         explicit=1
         process_list=$(printf '%s\n' ${PID_ARGS[@]+"${PID_ARGS[@]}"})
     else
+# @full-end
         if ! process_list=$(
             ps -axww -o pid=,comm= 2>/dev/null | head -n "$((PROCESS_SCAN_LIMIT + 1))"
             statuses=("${PIPESTATUS[@]}")
@@ -1908,11 +2220,14 @@ scan_processes_other() {
             PROCESS_VISIBILITY_LIMITED=true
             warn "无法列出进程，运行中 JVM 的覆盖不完整。"
         fi
+# @full-begin
     fi
+# @full-end
     while read -r pid exe; do
         [ -n "$pid" ] || continue
         if (( scanned >= PROCESS_SCAN_LIMIT )); then PROCESS_LIMIT_REACHED=true; break; fi
         scanned=$((scanned + 1))
+# @full-begin
         if [ "$explicit" -eq 1 ]; then
             selected=$(ps -ww -p "$pid" -o pid=,comm= 2>/dev/null) || selected=
             read -r selected_pid exe <<< "$selected"
@@ -1923,25 +2238,27 @@ scan_processes_other() {
                 continue
             fi
         elif [ -z "$exe" ] || ! java_name "$exe"; then
+# @full-end
+# @batch         if [ -z "$exe" ] || ! java_name "$exe"; then
             continue
         fi
         NOTES=""
         root=$(java_root_of "$exe")
         version=""; vendor=""; vm=""; arch=""
-        if [ -r "$root/release" ]; then
-            version=$(release_get "$root/release" JAVA_RUNTIME_VERSION)
-            [ -n "$version" ] || version=$(release_get "$root/release" JAVA_VERSION)
-            vendor=$(release_get "$root/release" IMPLEMENTOR)
-            vm=$(release_get "$root/release" JVM_VARIANT)
-            arch=$(release_get "$root/release" OS_ARCH)
+        if release_data=$(release_snapshot "$root/release"); then
+            version=$(release_value "$release_data" JAVA_RUNTIME_VERSION)
+            [ -n "$version" ] || version=$(release_value "$release_data" JAVA_VERSION)
+            vendor=$(release_value "$release_data" IMPLEMENTOR)
+            vm=$(release_value "$release_data" JVM_VARIANT)
+            arch=$(release_value "$release_data" OS_ARCH)
             add_note "运行中加载的库未核实，版本取磁盘启动器"
         else
             add_note "无 release 元数据"
         fi
         [ -n "$arch" ] || arch=$ARCH_RAW
         cpu=$(cpu_assess "$arch" "$CPU_STATE")
-        product=$(jdk_product "$root" "$vendor")
-        bevid_and_build=$(assess_jdk_build "$root" "$version" "$vendor" "$product" "$vm")
+        product=$(jdk_product "$root" "$vendor" "$release_data")
+        bevid_and_build=$(assess_jdk_build "$root" "$version" "$vendor" "$product" "$vm" "$release_data")
         build=$(printf '%s' "$bevid_and_build" | cut -f1)
         bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
         [ -n "$build" ] || build="unknown"
@@ -1955,6 +2272,7 @@ scan_processes_other() {
 # ---------------------------------------------------------------------------
 # 采集：java -version 门禁
 # ---------------------------------------------------------------------------
+# @full-begin
 java_launcher_flags() (
     local limiter=$1 java=$2 mode=$3 out
     shift 3
@@ -1982,9 +2300,11 @@ java_launcher_flags() (
                 (origin["UseAVX"] == "" ? "null" : origin["UseAVX"])
         }'
 )
+# @full-end
 
+# @full-begin
 scan_java_binary() {
-    local bin=$1 out version vendor vm arch product build bevid cpu status reason notes home full_version
+    local bin=$1 out version vendor vm arch product build bevid cpu status reason notes home full_version release_data=
     [ -f "$bin" ] || die "java 可执行文件不存在: $bin"
     [ -x "$bin" ] || die "java 不可执行: $bin"
 
@@ -2013,8 +2333,8 @@ scan_java_binary() {
     [ -z "$full_version" ] || version=$full_version
     home=$(java_root_of "$(resolve_symlinks "$bin")")
     vendor=""
-    if [ -n "$home" ]; then
-        vendor=$(release_get "$home/release" IMPLEMENTOR)
+    if [ -n "$home" ] && release_data=$(release_snapshot "$home/release"); then
+        vendor=$(release_value "$release_data" IMPLEMENTOR)
     fi
 
     notes=""
@@ -2024,7 +2344,7 @@ scan_java_binary() {
         *hotspot*|*"server vm"*|*"client vm"*) vm="HotSpot" ;;
     esac
     product=""
-    if [ -n "$home" ]; then product=$(jdk_product "$home" "$vendor"); fi
+    if [ -n "$home" ]; then product=$(jdk_product "$home" "$vendor" "$release_data"); fi
     if [ -z "$product" ]; then
         case $(lower "$out") in
             *"graalvm enterprise"*)
@@ -2039,12 +2359,12 @@ scan_java_binary() {
     arch=$ARCH_RAW
 
     cpu=$(cpu_assess "$arch" "$CPU_STATE")
-    bevid_and_build=$(assess_jdk_build "$home" "$version" "$vendor" "$product" "$vm")
+    bevid_and_build=$(assess_jdk_build "$home" "$version" "$vendor" "$product" "$vm" "$release_data")
     build=$(printf '%s' "$bevid_and_build" | cut -f1)
     bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
     [ -n "$build" ] || build="unknown"
 
-    disk_build=$(release_get "$home/release" JAVA_RUNTIME_VERSION)
+    disk_build=$(release_value "$release_data" JAVA_RUNTIME_VERSION)
     if runtime_version_conflicts "$full_version" "$disk_build"; then
         build=unknown
         bevid="启动器构建与磁盘 release 不一致"
@@ -2074,18 +2394,20 @@ scan_java_binary() {
     emit_finding "java:$bin" "java-binary" "$status" "$reason" "$build" "$bevid" \
         "$cpu" "$version" "$bin" "$vendor" "${product:-}" "${vm:-}" "$arch" "" "false" "" "$notes" "" "" "" "" "" "$java_package_json" "$flag_probe_json"
 }
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 采集：按目录名盘点可能的应用
 # ---------------------------------------------------------------------------
+# @full-begin
 scan_apps() {
     local root=$1 depth=$2 d name token label
     [ -d "$root" ] || die "--apps 路径不是目录: $root"
     root=$(real_path "$root")
 
-    bounded_find "$DIRECTORY_ENTRY_LIMIT" "$WORK/apps-coverage" "$WORK/apps-entries" \
-        "$root" -xdev -maxdepth "$depth" \
-        \( -path "$root" -o ! -name '.*' -o -prune \)
+    local coverage=$WORK/apps-coverage
+    local entries_remaining=$DIRECTORY_ENTRY_LIMIT dirs_remaining=$DIRECTORY_WALK_LIMIT
+    walk_java_root "$root" "$((10#$depth))" apps > "$WORK/apps-entries" || :
     while IFS= read -r -d '' d; do
         [ -d "$d" ] && [ ! -L "$d" ] && [[ $d != */.* ]] || continue
         [ "$d" = "$root" ] && continue
@@ -2111,19 +2433,24 @@ scan_apps() {
             *spinnaker*)    label="Spinnaker" ;;
         esac
         [ -n "$label" ] || continue
-        printf '%s\037%s\037%s\n' "$label" '目录名匹配，应用身份和漏洞暴露待核验' "$(san_field "$d")" >> "$APP_FILE"
+        printf '%s\037%s\037%s\n' "$label" '目录名匹配，应用身份和漏洞暴露待核验' "$(san_field "$d")" >> "$APP_FILE" ||
+            die "写入应用巡检发现失败"
     done < "$WORK/apps-entries"
 }
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 采集：演示样本（完全不采集本机数据）
 # ---------------------------------------------------------------------------
+# @full-begin
 demo_cpuinfo() {
     local extra=$1
     local f="fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc bmi1 avx2 $extra"
     printf 'processor\t: 0\nflags\t\t: %s\nprocessor\t: 1\nflags\t\t: %s\n' "$f" "$f"
 }
+# @full-end
 
+# @full-begin
 run_demo() {
     local with="avx512f avx512bw avx512vbmi bmi2"
     local without="avx512f avx512bw bmi2"
@@ -2185,7 +2512,9 @@ run_demo() {
     [ "$bad" -eq 0 ] || return 1
     return 0
 }
+# @full-end
 
+# @full-begin
 status_label() {
     case $1 in
         affected)     printf '受影响' ;;
@@ -2196,7 +2525,9 @@ status_label() {
         *)            printf '%s' "$1" ;;
     esac
 }
+# @full-end
 
+# @full-begin
 build_label() {
     case $1 in
         fixed)        printf '已修复' ;;
@@ -2207,14 +2538,18 @@ build_label() {
         *)            printf '%s' "$1" ;;
     esac
 }
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 报告
 # ---------------------------------------------------------------------------
 total_count() { wc -l < "$FIND_FILE" 2>/dev/null | tr -d ' '; }
 status_count() { awk -F'\037' -v s="$1" '$3 == s { c++ } END { print c + 0 }' "$FIND_FILE"; }
+# @full-begin
 apps_count() { wc -l < "$APP_FILE" 2>/dev/null | tr -d ' '; }
+# @full-end
 
+# @full-begin
 brief_name() {
     local id=$1 kind=$2 version=$3
     case $kind in
@@ -2222,12 +2557,16 @@ brief_name() {
         *)            printf '%s · Java %s' "$id" "${version:-未知}" ;;
     esac
 }
+# @full-end
 
+# @full-begin
 txt_header() {
     printf '%s · %s（规则 %s · 模式 %s · bash 单文件版）\n' "$NICKNAME" "$CVE" "$RULES_AS_OF" "$MODE_NAME"
     printf '主机: %s / %s    CPU: %s（%s）\n' "$(hostname 2>/dev/null || echo unknown)" "$ARCH_RAW" "$CPU_STATE" "$CPU_SOURCE"
 }
+# @full-end
 
+# @full-begin
 report_txt() {
     local total affected potential mitigated notaffected unknown
     local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
@@ -2316,6 +2655,7 @@ report_txt() {
         while IFS= read -r id; do printf '  - %s\n' "$id"; done < "$WARN_FILE"
     fi
 }
+# @full-end
 
 json_escape() {
     printf '%sX' "${1:-}" | LC_ALL=C awk '
@@ -2380,7 +2720,10 @@ json_notes() {
 
 report_json() {
     local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
+# @full-begin
     local first=1 total affected potential mitigated notaffected unknown apps
+# @full-end
+# @batch     local first=1 total affected potential mitigated notaffected unknown apps=0
 
     total=$(total_count)
     affected=$(status_count affected)
@@ -2388,7 +2731,9 @@ report_json() {
     mitigated=$(status_count mitigated)
     notaffected=$(status_count not_affected)
     unknown=$(status_count unknown)
+# @full-begin
     apps=$(apps_count)
+# @full-end
 
     printf '{\n'
     printf '  "cve": %s,\n' "$(jstr "$CVE")"
@@ -2400,9 +2745,14 @@ report_json() {
     printf '  "cpu": {"arch": %s, "state": %s, "required_features": %s, "counts": %s, "source": %s},\n' \
         "$(jstr "$ARCH_RAW")" "$(jstr "$CPU_STATE")" "$(jstr "$REQ_FEATURES")" "$(jstr "$CPU_COUNTS")" "$(jstr "$CPU_SOURCE")"
 
+# @full-begin
     printf '  "coverage": {"root_max_depth": %s, "root_depth_boundaries": %s, "root_scan_errors": %s, "unreadable_process_maps": %s, "process_limit_reached": %s, "process_visibility_limited": %s, "root_entry_limit_reached": %s, "apps_entry_limit_reached": %s, "apps_scan_errors": %s, "jvm_maps_limited": %s, "package_budget_exhausted": %s},\n' \
         "$((10#$ROOT_DEPTH))" "$ROOT_DEPTH_BOUNDARIES" "$ROOT_SCAN_ERRORS" "$LIMITED_PROCS" \
         "$PROCESS_LIMIT_REACHED" "$PROCESS_VISIBILITY_LIMITED" "$ROOT_ENTRY_LIMIT_REACHED" "$APPS_ENTRY_LIMIT_REACHED" "$APPS_SCAN_ERRORS" "$JVM_MAPS_LIMITED" "${java_pkg_limited:-false}"
+# @full-end
+# @batch     printf '  "coverage": {"root_max_depth": %s, "root_depth_boundaries": %s, "root_scan_errors": %s, "unreadable_process_maps": %s, "process_limit_reached": %s, "process_visibility_limited": %s, "root_entry_limit_reached": %s, "apps_entry_limit_reached": %s, "apps_scan_errors": %s, "jvm_maps_limited": %s, "package_budget_exhausted": %s},\n' \
+# @batch         "$((10#$ROOT_DEPTH))" "$ROOT_DEPTH_BOUNDARIES" "$ROOT_SCAN_ERRORS" "$LIMITED_PROCS" \
+# @batch         "$PROCESS_LIMIT_REACHED" "$PROCESS_VISIBILITY_LIMITED" "$ROOT_ENTRY_LIMIT_REACHED" false 0 "$JVM_MAPS_LIMITED" "${java_pkg_limited:-false}"
 
     printf '  "warnings": ['
     first=1
@@ -2428,10 +2778,12 @@ report_json() {
             "$(jstr "$version")" "$(jstr "$jhome")" "$(jstr "$vendor")" "$(jstr "$product")" "$(jstr "$vm")" "$(jstr "$arch")"
         printf '"flags": %s, "flags_effective": %s, "container": %s, "notes": %s' \
             "$(jstr "$flags")" "${feff:-false}" "$(jstr "$container")" "$(json_notes "$notes")"
+# @full-begin
         case $reason in
             按显式信任*) printf ', "flags_evidence_source": "startup_arguments_estimated"' ;;
             *) if [ "$kind" = process ] && [ "$feff" = true ]; then printf ', "flags_evidence_source": "jcmd"'; fi ;;
         esac
+# @full-end
         if [ -n "$identity_confidence" ]; then
             printf ', "identity_confidence": %s' "$(jstr "$identity_confidence")"
         fi
@@ -2441,11 +2793,14 @@ report_json() {
                 "$(jstr "$disk_hint_product")" "$(jstr "$disk_hint_build")"
         fi
         if [[ -n $package_json ]]; then printf ', "package_evidence": %s' "$package_json"; fi
+# @full-begin
         if [[ -n $flag_probe_json ]]; then printf ', "launcher_flag_probe": %s' "$flag_probe_json"; fi
+# @full-end
         printf '}'
     done < "$FIND_FILE"
     printf '\n  ],\n'
 
+# @full-begin
     printf '  "apps": [\n'
     first=1
     while IFS=$'\037' read -r id kind path; do
@@ -2455,9 +2810,12 @@ report_json() {
         printf '    {"name": %s, "exposure": %s, "path": %s, "evidence": "directory_name"}' "$(jstr "$id")" "$(jstr "$kind")" "$(jstr "$path")"
     done < "$APP_FILE"
     printf '\n  ]\n'
+# @full-end
+# @batch     printf '  "apps": []\n'
     printf '}\n'
 }
 
+# @full-begin
 csv_field() {
     local v=${1:-}
     case $v in
@@ -2466,7 +2824,9 @@ csv_field() {
     v=${v//\"/\"\"}
     printf '"%s"' "$v"
 }
+# @full-end
 
+# @full-begin
 csv_line() {
     local out="" sep="" f
     for f in "$@"; do
@@ -2475,7 +2835,9 @@ csv_line() {
     done
     printf '%s' "$out"
 }
+# @full-end
 
+# @full-begin
 report_csv() {
     local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
     printf '%s\n' "cve,rules_as_of,mode,id,kind,status,reason,build_assessment,build_evidence,cpu_assessment,version,java_home,vendor,product,vm,arch,cpu_state,cpu_source,patch,patch_ref,flags,flags_effective,container,notes,identity_confidence,disk_version,disk_vendor,disk_product,disk_build_assessment,package_evidence,launcher_flag_probe"
@@ -2488,7 +2850,9 @@ report_csv() {
         printf '\n'
     done < "$FIND_FILE"
 }
+# @full-end
 
+# @full-begin
 report_apps_csv() {
     local id kind path
     while IFS=$'\037' read -r id kind path; do
@@ -2497,10 +2861,12 @@ report_apps_csv() {
         printf '\n'
     done < "$APP_FILE"
 }
+# @full-end
 
 # ---------------------------------------------------------------------------
 # 参数解析
 # ---------------------------------------------------------------------------
+# @full-begin
 parse_args() {
     while [ $# -gt 0 ]; do
         case $1 in
@@ -2517,6 +2883,7 @@ parse_args() {
             --apps)       [ $# -ge 2 ] || die "--apps 需要一个目录"; APPS_DIR=$2; shift 2 ;;
             --apps-depth) [ $# -ge 2 ] || die "--apps-depth 需要数字"
                           case $2 in ''|*[!0-9]*) die "--apps-depth 需要正整数: $2" ;; esac
+                          [[ ${#2} -le 2 ]] && (( 10#$2 <= 64 )) || die "--apps-depth 最大为 64"
                           APPS_DEPTH=$2; shift 2 ;;
             --format)     [ $# -ge 2 ] || die "--format 需要 txt/json/csv"
                           case $2 in txt|json|csv) FORMAT=$2 ;; *) die "未知格式: $2" ;; esac
@@ -2529,6 +2896,7 @@ parse_args() {
             --root)       [ $# -ge 2 ] || die "--root 需要一个目录"; ROOT_ARGS[${#ROOT_ARGS[@]}]=$2; shift 2 ;;
             --root-depth) [ $# -ge 2 ] || die "--root-depth 需要数字"
                           case $2 in ''|*[!0-9]*) die "--root-depth 需要正整数: $2" ;; esac
+                          [[ ${#2} -le 2 ]] && (( 10#$2 <= 64 )) || die "--root-depth 最大为 64"
                           ROOT_DEPTH=$2; shift 2 ;;
             --jcmd)       JCMD=1; shift ;;
             --processes-only) PROC_ONLY=1; shift ;;
@@ -2563,6 +2931,7 @@ parse_args() {
     [[ $FAIL_ON =~ $failure_pattern ]] ||
         die "--fail-on 只接受 affected,potential,mitigated,not_affected,unknown"
 }
+# @full-end
 
 cleanup() {
     [ -n "${WORK:-}" ] && [ -d "$WORK" ] && rm -rf "$WORK"
@@ -2959,10 +3328,21 @@ nginx_config_skip() {
 
 # Count directory entries before matching, even if the directory has no matching files.
 # The caller owns the bounded matches array and shares the counter with nested includes.
+web_config_lookup() {
+    local budget_file=${WEB_CONFIG_BUDGET_FILE:-}
+    if [[ -n $budget_file && -f $budget_file ]]; then
+        IFS= read -r config_lookups < "$budget_file" || return 1
+    fi
+    (( config_lookups < WEB_CONFIG_LOOKUP_LIMIT )) || return 1
+    config_lookups=$((config_lookups + 1))
+    if [[ -n $budget_file ]]; then printf '%s\n' "$config_lookups" > "$budget_file" || return 1; fi
+}
+
 web_config_matches() {
     local dir=$1 pattern=$2 entry name
     matches=()
     (( directory_entries < WEB_CONFIG_DIRECTORY_LIMIT )) || return 1
+    web_config_lookup || return 1
     # Unsorted one-per-line ls streams entries. Its -b escapes keep newlines in names intact.
     while IFS= read -r entry; do
         [[ -n $entry ]] && (( directory_entries < WEB_CONFIG_DIRECTORY_LIMIT )) || return 1
@@ -2981,7 +3361,7 @@ sorted_config_matches() {
 }
 
 nginx_config_stream() {
-    local path=$1 base=$2 depth=$3 id size content entry target dir pattern match fs_path fs_dir status problem_line reason
+    local path=$1 base=$2 depth=$3 id size content entry target target_key dir pattern match fs_path fs_dir status problem_line reason
     local -a includes=() matches=()
     fs_path=$path
     if [[ -n $config_root ]] && ! fs_path=$(nginx_config_root_path "$config_root" "$path"); then
@@ -3019,6 +3399,13 @@ nginx_config_stream() {
             nginx_config_skip include_depth_limit "$target"
             continue
         fi
+        printf -v target_key '%q' "$target"
+        [[ $expanded_targets != *$'\n'"$target_key"$'\n'* ]] || continue
+        if ! web_config_lookup; then
+            nginx_config_skip include_lookup_limit "$target"
+            break
+        fi
+        expanded_targets+="$target_key"$'\n'
         if [[ $target == *[\*\?\[]* ]]; then
             dir=${target%/*}
             pattern=${target##*/}
@@ -3048,12 +3435,14 @@ nginx_config_stream() {
 }
 
 nginx2root_config() {
-    local config config_root= count=0 explicit_roots=0 directory_entries=0 entry dir
+    local config config_root= count=0 explicit_roots=0 directory_entries=0 config_lookups=0 expanded_targets=$'\n' entry dir
     local -a configs=() matches=()
+# @full-begin
     if [[ ${1:-} == --root ]]; then
         config_root=$2
         shift 2
     fi
+# @full-end
     if [ "$#" -gt 0 ]; then
         configs=("$@")
         explicit_roots=1
@@ -3102,7 +3491,7 @@ nginx2root_config() {
 
 nginx2root_sctp() {
     local dir file size loaded=false automatic_block_hint=false in_use=null
-    local directories_incomplete=false directory_entries=0 files=0
+    local directories_incomplete=false directory_entries=0 config_lookups=0 WEB_CONFIG_BUDGET_FILE= files=0
     local -a matches=()
     [ ! -d /sys/module/sctp ] || loaded=true
     if [ -r /proc/net/sctp/assocs ]; then
@@ -3233,8 +3622,9 @@ apache_config_entry() {
 }
 
 apache_config_hints() {
-    local file count=0 seen_files=" " directory_entries=0 explicit_roots=0 dir entry
+    local file count=0 seen_files=" " directory_entries=0 config_lookups=0 explicit_roots=0 dir entry
     local -a configs=() matches=()
+# @full-begin
     if [ "$#" -gt 0 ]; then
         configs=("$@")
         explicit_roots=1
@@ -3243,6 +3633,10 @@ apache_config_hints() {
                  '/etc/apache2/mods-enabled/*.load' /etc/httpd/conf/httpd.conf '/etc/httpd/conf.d/*.conf'
                  '/etc/httpd/conf.modules.d/*.conf' /usr/local/apache2/conf/httpd.conf)
     fi
+# @full-end
+# @batch     configs=(/etc/apache2/apache2.conf /etc/apache2/{mods,conf,sites}'-enabled/*.conf'
+# @batch              '/etc/apache2/mods-enabled/*.load' /etc/httpd/conf/httpd.conf '/etc/httpd/conf.d/*.conf'
+# @batch              '/etc/httpd/conf.modules.d/*.conf' /usr/local/apache2/conf/httpd.conf)
     (
         shopt -s nocasematch
         for file in "${configs[@]}"; do
@@ -3333,14 +3727,24 @@ apache_module_rpm_version() {
 }
 
 apache_inventory() {
+# @full-begin
     local format=txt proc name pid path id start row= seen=' ' rows=0 disk=0 comma= version reference mapped config
+# @full-end
+# @batch     local format=json proc name pid path id start row= seen=' ' rows=0 disk=0 comma= version reference mapped config
     local inspected=0 visibility_limited=false coverage_incomplete=false config_incomplete=false module_probe_limit=false
+# @full-begin
     local gate=0 modules=0 unknown=0 explicit= proc_limit=false unresolved=0 image_state match package_hint http2_evidence disk_http2=condition_not_observed module_version_source
+# @full-end
+# @batch     local gate=0 modules=0 unknown=0 proc_limit=false unresolved=0 image_state match package_hint http2_evidence disk_http2=condition_not_observed module_version_source
     local mapped_info module_path module_dev module_inode module_range module_id expected major minor
     local runtime_modules module_version module_reference module_identity module_comma module_gate module_unknown
     local module_index module_count=0 module_probed
     local image_index image_count=0
+# @full-begin
     local -a configs=() module_ids=() module_versions=() image_ids=() image_versions=()
+# @full-end
+# @batch     local -a module_ids=() module_versions=() image_ids=() image_versions=()
+# @full-begin
     while (($#)); do
         case $1 in
             --json) format=json ;;
@@ -3357,11 +3761,15 @@ apache_inventory() {
         esac
         shift
     done
+# @full-end
     if [ "$OS" != Linux ]; then
         linux_inventory_unavailable "$format" Apache CVE-2026-119618
         return $?
     fi
+# @full-begin
     config=$(apache_config_hints ${configs[@]+"${configs[@]}"})
+# @full-end
+# @batch     config=$(apache_config_hints)
     if [[ $config == *'"load_module":true'* || $config == *'"h2":true'* || $config == *'"h2c":true'* ]]; then
         disk_http2=disk_hints_present
     fi
@@ -3460,16 +3868,23 @@ apache_inventory() {
         [[ $reference != potential ]] || gate=1
         [[ $reference != unknown ]] || unknown=1
         [ "$module_gate" -ne 1 ] || gate=1
+# @full-begin
         if [ "$format" = json ]; then
+# @full-end
             row+="$comma{\"kind\":\"process\",\"pid\":$pid,\"path\":$(jstr "$(san_field "$path")"),\"version\":$(jstr "$version"),\"version_status\":$(jstr "$reference"),\"mod_http2_mapped\":$mapped,\"mapped_http2_modules\":[$runtime_modules],\"http2_evidence\":\"$http2_evidence\",\"disk_identity_matched\":$match,\"disk_identity_status\":\"$image_state\"}"
             comma=,
+# @full-begin
         else
             printf 'Apache PID %s · %q · %s · %s · mod_http2 映射 %s · 磁盘身份 %s · HTTP/2 证据 %s\n' "$pid" "$path" "${version:-版本未知}" "$reference" "$mapped" "$image_state" "$http2_evidence"
             if [[ -n $runtime_modules ]]; then printf '  已映射模块证据: [%s]\n' "$runtime_modules"; fi
         fi
+# @full-end
         rows=$((rows + 1))
     done < <(web_process_paths)
+# @full-begin
     for path in "$explicit" "$(type -P apache2 || :)" "$(type -P httpd || :)" /usr/sbin/apache2 /usr/sbin/httpd /usr/local/apache2/bin/httpd; do
+# @full-end
+# @batch     for path in "$(type -P apache2 || :)" "$(type -P httpd || :)" /usr/sbin/apache2 /usr/sbin/httpd /usr/local/apache2/bin/httpd; do
         [ -n "$path" ] && [ -f "$path" ] || continue
         id=$(file_id "$path") || continue
         [[ $seen != *" $id "* ]] || continue
@@ -3479,12 +3894,16 @@ apache_inventory() {
         [[ $reference != potential ]] || gate=1
         [[ $reference != unknown ]] || unknown=1
         package_hint=$(web_package_hint "$path")
+# @full-begin
         if [ "$format" = json ]; then
+# @full-end
             row+="$comma{\"kind\":\"installation\",\"path\":$(jstr "$(san_field "$path")"),\"version\":$(jstr "$version"),\"version_status\":$(jstr "$reference"),\"package_evidence\":${package_hint:-null},\"http2_evidence\":\"$disk_http2\"}"
             comma=,
+# @full-begin
         else
             printf 'Apache 磁盘安装 · %q · %s · %s\n' "$path" "${version:-版本未知}" "$reference"
         fi
+# @full-end
         if [[ $format != json && -n $package_hint ]]; then printf '软件包线索: %s\n' "$package_hint"; fi
         disk=$((disk + 1))
     done
@@ -3505,12 +3924,16 @@ apache_inventory() {
         [[ $reference != potential ]] || gate=1
         [[ $reference != unknown ]] || unknown=1
         package_hint=$(web_package_hint "$path")
+# @full-begin
         if [ "$format" = json ]; then
+# @full-end
             row+="$comma{\"kind\":\"module_installation\",\"httpd_association\":\"unverified\",\"version_source\":\"$module_version_source\",\"path\":$(jstr "$(san_field "$path")"),\"version\":$(jstr "$version"),\"version_status\":$(jstr "$reference"),\"package_evidence\":${package_hint:-null},\"http2_evidence\":\"$disk_http2\"}"
             comma=,
+# @full-begin
         else
             printf 'Apache 磁盘模块 · %q · %s · %s · 所属 httpd 待核验\n' "$path" "${version:-版本未知}" "$reference"
         fi
+# @full-end
         if [[ $format != json && -n $package_hint ]]; then printf '软件包线索: %s\n' "$package_hint"; fi
         modules=$((modules + 1))
     done
@@ -3520,9 +3943,12 @@ apache_inventory() {
     if web_coverage_incomplete "$proc_limit" "$unresolved" "$config" "$visibility_limited" || [ "$unknown" -eq 1 ]; then
         coverage_incomplete=true
     fi
+# @full-begin
     if [ "$format" = json ]; then
+# @full-end
         printf '{"status":"%s","cve":"CVE-2026-119618","patch_verified":false,"configuration":%s,"proc_limit_reached":%s,"coverage":{"proc_limit_reached":%s,"incomplete_process_evidence":%d,"process_visibility_limited":%s,"configuration_incomplete":%s,"module_probe_limit_reached":%s,"evidence_incomplete":%s},"findings":[%s]}' \
             "$status" "$config" "$proc_limit" "$proc_limit" "$unresolved" "$visibility_limited" "$config_incomplete" "$module_probe_limit" "$coverage_incomplete" "$row"
+# @full-begin
     else
         if [ "$status" = not_observed ]; then printf 'Apache · 当前范围未观察到安装或进程\n'; fi
         printf 'Apache CVE-2026-119618 · 磁盘配置线索: %s\n' "$config"
@@ -3531,6 +3957,7 @@ apache_inventory() {
         fi
         printf '进程覆盖 · 达到上限 %s · 证据不完整 %s\n' "$proc_limit" "$unresolved"
     fi
+# @full-end
     if [ "$gate" -eq 1 ]; then return 1; fi
     if [ "$coverage_incomplete" = true ]; then return 3; fi
     return 0
@@ -3550,6 +3977,7 @@ apache_version() {
 }
 
 audit_all() {
+# @full-begin
     local format=txt rc_java=0 rc_nginx=0 rc_apache=0 java_report nginx_report apache_report
     local -a java_args=(--quiet) nginx_args=() apache_args=()
     while (($#)); do
@@ -3570,8 +3998,14 @@ audit_all() {
         java_report=$(java4shell_main "${java_args[@]}" --json) || rc_java=$?
         nginx_report=$(nginx2root_scan ${nginx_args[@]+"${nginx_args[@]}"} --json) || rc_nginx=$?
         apache_report=$(apache_inventory --json ${apache_args[@]+"${apache_args[@]}"}) || rc_apache=$?
+# @full-end
+# @batch     local rc_java=0 rc_nginx=0 rc_apache=0 java_report nginx_report apache_report
+# @batch         java_report=$(java4shell_main) || rc_java=$?
+# @batch         nginx_report=$(nginx2root_scan) || rc_nginx=$?
+# @batch         apache_report=$(apache_inventory) || rc_apache=$?
         printf '{"scope":"local_read_only_inventory","java4shell":%s,"nginx2root":%s,"apache":%s,"exit_codes":{"java4shell":%s,"nginx2root":%s,"apache2root":%s}}\n' \
             "${java_report:-null}" "${nginx_report:-null}" "${apache_report:-null}" "$rc_java" "$rc_nginx" "$rc_apache"
+# @full-begin
     else
         printf '=== Java4Shell ===\n'
         (java4shell_main "${java_args[@]}") || rc_java=$?
@@ -3580,6 +4014,7 @@ audit_all() {
         printf '\n=== Apache HTTP Server ===\n'
         apache_inventory ${apache_args[@]+"${apache_args[@]}"} || rc_apache=$?
     fi
+# @full-end
     if ((rc_java == 2 || rc_nginx == 2 || rc_apache == 2)); then return 2; fi
     if ((rc_java == 1 || rc_nginx == 1 || rc_apache == 1)); then return 1; fi
     if ((rc_java != 0 || rc_nginx != 0 || rc_apache != 0)); then return 3; fi
@@ -3694,15 +4129,23 @@ web_package_hint() {
 }
 
 nginx2root_scan() {
+    local WEB_CONFIG_BUDGET_FILE=
+    if [[ -n ${SCAN_WORK:-} ]]; then WEB_CONFIG_BUDGET_FILE=$SCAN_WORK/nginx-config-lookups; fi
+# @full-begin
     local format=txt explicit="" installed path proc pid id current raw matched
+# @full-end
+# @batch     local format=json installed path proc pid id current raw matched
     local inspected=0 visibility_limited=false
     local seen=' ' rows=0 comma= gate=0 unknown=0 total=0 config_report sctp_report package_hint
     local start image_state proc_limit=false unresolved=0 self_ns process_ns self_root metadata flavor plus module_hints product_version compiled_config config_entry row_config config_source incomplete=false gate_hit=false
     local index package_count=0 condition_not_observed=0 potential_missing=0 unknown_missing=0 unattributed=0 incomplete_config=0 config_incomplete=false unmapped= unmapped_seen=" "
-    local config_parent parent_start config_count=0
+    local config_parent parent_start config_count=0 image_index image_count=0
     local -a package_ids=() package_values=()
-    local -a config_entries=() config_values=()
+    local -a config_entries=() config_values=() image_ids=() image_metadata=()
+# @full-begin
     local -a config_paths=()
+# @full-end
+# @full-begin
     while (($#)); do
         case $1 in
             --json|--format=json) format=json ;;
@@ -3720,17 +4163,25 @@ nginx2root_scan() {
         esac
         shift
     done
+# @full-end
     if [ "$OS" != Linux ]; then
         linux_inventory_unavailable "$format" Nginx2Root
         return $?
     fi
+# @full-begin
     config_report=$(nginx2root_config ${config_paths[@]+"${config_paths[@]}"})
+# @full-end
+# @batch     config_report=$(nginx2root_config)
     sctp_report=$(nginx2root_sctp)
+# @full-begin
     if [ "$format" = json ]; then
+# @full-end
         printf '{"status":"collected","source":"local_binary_inventory","patch_verified":false,"exploitability_confirmed":false,"sctp":%s,"configuration":%s,"sources":["https://nginx.org/en/security_advisories.html","https://cert.europa.eu/publications/security-advisories/2026-022/","https://openresty.org/en/ann-1031008001.html","https://openresty.org/en/changelog-1025003.html","https://openresty.org/en/changelog-1027001.html","https://github.com/alibaba/tengine/blob/3.2.0-rc5/src/core/nginx.h","https://docs.nginx.com/nginx-ingress-controller/releases/","https://docs.nginx.com/nginx/releases/"],"findings":[' "$sctp_report" "$config_report"
+# @full-begin
     else
         printf 'NGINX 上游版本参考 · 仅覆盖本专项五项 CVE\n磁盘配置线索: %s\n内核 SCTP 线索: %s\n' "$config_report" "$sctp_report"
     fi
+# @full-end
 
     nginx_cached_config() {
         local entry=$1 config_index
@@ -3788,7 +4239,9 @@ nginx2root_scan() {
         case $references in *'"status":"potential"'*) gate=1 ;; esac
         case $references in *'"status":"unknown"'*) unknown=1 ;; esac
         total=$((total + 1))
+# @full-begin
         if [ "$format" = json ]; then
+# @full-end
             printf '%s{"kind":"%s","pid":%s,"path":%s,"version":%s,"disk_identity_matched":%s,"disk_identity_status":"%s","flavor":"%s","plus_release":%s,"plus_release_unresolved":%s,"product_version":%s,"embedded_nginx_version":%s,"patch_status":"unverified","cves":' \
                 "$comma" "$kind" "$(jstr "$pid")" "$(jstr "$(san_field "$path")")" "$(jstr "$raw")" "$matched" "$image_state" "$flavor" "$(jstr "$plus")" "$plus_unresolved" "$(jstr "$product_version")" "$(jstr "$raw")"
             printf '%s,"package_evidence":%s,"binary_module_hints":%s' "$references" "$package_hint" "${module_hints:-null}"
@@ -3796,6 +4249,7 @@ nginx2root_scan() {
             if [ -n "$row_config" ]; then printf ',"configuration_entry":%s,"configuration_entry_source":%s,"configuration":%s' "$(jstr "$config_entry")" "$(jstr "$config_source")" "$row_config"; fi
             printf '}'
             comma=,
+# @full-begin
         else
             printf '%s %s %q · %s %s · NGINX 内核 %s · 磁盘身份 %s\n' "$kind" "$pid" "$path" "${flavor:-未知}" "${product_version:-}" "${raw:-未知}" "$image_state"
             if [[ -n $compiled_config ]]; then printf '编译时配置路径线索 · %q\n' "$compiled_config"; fi
@@ -3805,6 +4259,7 @@ nginx2root_scan() {
             if [[ -n $module_hints && $module_hints != '[]' ]]; then printf '二进制模块线索 · %s\n' "$module_hints"; fi
             [ "$package_hint" = null ] || printf '软件包线索: %s\n' "$package_hint"
         fi
+# @full-end
     }
 
     self_ns=$(readlink /proc/self/ns/mnt 2>/dev/null || :)
@@ -3823,7 +4278,17 @@ nginx2root_scan() {
         start=$(java_process_start "$pid")
         path=$(readlink "$proc/exe" 2>/dev/null || :)
         id=$(file_id "$proc/exe" || :)
-        metadata=$(nginx2root_binary_metadata "$proc/exe" with_config)
+        metadata=
+        if [[ -n $id ]]; then
+            for ((image_index=0; image_index<image_count; image_index++)); do
+                [[ ${image_ids[image_index]} != "$id" ]] || break
+            done
+            if (( image_index < image_count )); then
+                metadata=${image_metadata[image_index]}
+            else
+                metadata=$(nginx2root_binary_metadata "$proc/exe" with_config)
+            fi
+        fi
         IFS='|' read -r raw flavor plus module_hints product_version compiled_config <<< "$metadata"
         image_state=$(web_disk_identity "$proc" "$path" "$id")
         process_ns=$(readlink "$proc/ns/mnt" 2>/dev/null || :)
@@ -3831,17 +4296,26 @@ nginx2root_scan() {
               $(java_process_start "$pid") != "$start" ]]; then
             raw= flavor= plus= module_hints= product_version= compiled_config=
             image_state=unverified
-        elif [[ $image_state == matched ]]; then
-            seen+="$id "
+        else
+            if (( image_index == image_count )); then
+                image_ids[image_count]=$id
+                image_metadata[image_count]=$metadata
+                image_count=$((image_count + 1))
+            fi
+            [[ $image_state != matched ]] || seen+="$id "
         fi
         matched=$(web_identity_boolean "$image_state")
         [[ $image_state == matched ]] || unresolved=$((unresolved + 1))
         package_hint=null
         config_entry= row_config= config_source=
+# @full-begin
         if [ -n "${config_paths[0]:-}" ]; then row_config=$config_report; config_source=explicit; config_entry=${config_paths[0]}; fi
+# @full-end
         if [[ $matched == true && -n $self_ns && $process_ns == "$self_ns" &&
               -n $self_root && $(file_id "$proc/root") == "$self_root" && $(file_id "$path") == "$id" ]]; then
+# @full-begin
             if [ -z "${config_paths[0]:-}" ]; then
+# @full-end
                 config_parent= parent_start=
                 config_entry=$(nginx_process_config_entry "$proc")
                 config_source=process_argument
@@ -3865,7 +4339,9 @@ nginx2root_scan() {
                     fi
                     if web_coverage_incomplete false 0 "$row_config"; then unknown=1; fi
                 fi
+# @full-begin
             fi
+# @full-end
             for ((index=0; index<package_count; index++)); do
                 [ "${package_ids[index]}" != "$id" ] || break
             done
@@ -3880,8 +4356,12 @@ nginx2root_scan() {
         rows=$((rows + 1))
     done < <(web_process_paths)
     installed=$(type -P nginx || :)
+# @full-begin
     for path in "$explicit" "$installed" "$(type -P openresty || :)" "$(type -P tengine || :)" \
                 /usr/sbin/nginx /usr/local/nginx/sbin/nginx /usr/local/openresty/nginx/sbin/nginx /usr/local/tengine/sbin/nginx; do
+# @full-end
+# @batch     for path in "$installed" "$(type -P openresty || :)" "$(type -P tengine || :)" \
+# @batch                 /usr/sbin/nginx /usr/local/nginx/sbin/nginx /usr/local/openresty/nginx/sbin/nginx /usr/local/tengine/sbin/nginx; do
         [ -n "$path" ] && [ -f "$path" ] || continue
         id=$(file_id "$path") || continue
         [[ $seen != *" $id "* ]] || continue
@@ -3890,11 +4370,14 @@ nginx2root_scan() {
         seen+="$id "
         package_hint=$(web_package_hint "$path" nginx)
         config_entry= row_config= config_source=
+# @full-begin
         if [ -n "${config_paths[0]:-}" ]; then
             row_config=$config_report
             config_source=explicit
             config_entry=${config_paths[0]}
         elif config_entry=$(nginx_layout_config "$path" "$flavor") && [ -n "$config_entry" ]; then
+# @full-end
+# @batch         if config_entry=$(nginx_layout_config "$path" "$flavor") && [ -n "$config_entry" ]; then
             config_source=installation_layout
             if [[ $path == /usr/sbin/nginx && $config_entry == /etc/nginx/nginx.conf ]]; then config_source=system_layout; fi
             nginx_cached_config "$config_entry"
@@ -3905,8 +4388,11 @@ nginx2root_scan() {
     if [ "$gate" -eq 1 ]; then gate_hit=true; fi
     if (( unattributed > 0 || incomplete_config > 0 )); then config_incomplete=true; fi
     if [ "$unknown" -eq 1 ] || [ "$total" -eq 0 ] || web_coverage_incomplete "$proc_limit" "$unresolved" "$config_report" "$visibility_limited"; then incomplete=true; fi
+# @full-begin
     if [ "$format" = json ]; then
+# @full-end
         printf '],"coverage":{"proc_limit_reached":%s,"incomplete_process_evidence":%d,"process_visibility_limited":%s,"evidence_incomplete":%s,"configuration_evidence_incomplete":%s,"configuration_incomplete":%s},"summary":{"risk_gate_hit":%s,"condition_not_observed":%d,"potential_condition_not_observed":%d,"unknown_condition_not_observed":%d,"configuration_not_attributed":%d,"configuration_incomplete":%d,"unmapped_product_versions":[%s]}}\n' "$proc_limit" "$unresolved" "$visibility_limited" "$incomplete" "$config_incomplete" "$config_incomplete" "$gate_hit" "$condition_not_observed" "$potential_missing" "$unknown_missing" "$unattributed" "$incomplete_config" "$unmapped"
+# @full-begin
     else
         if [ "$visibility_limited" = true ]; then
             printf '进程视图受限，无法完整核验运行状态。\n'
@@ -3918,28 +4404,49 @@ nginx2root_scan() {
         printf '配置读取不完整 · %d 项（按发现行和 CVE 计）\n' "$incomplete_config"
         printf '缺少必要磁盘线索 · %d 项（版本命中 %d · 版本未知 %d，按发现行和 CVE 计）\n' "$condition_not_observed" "$potential_missing" "$unknown_missing"
     fi
+# @full-end
     if [ "$gate" -eq 1 ]; then return 1; fi
     if [ "$incomplete" = true ]; then return 3; fi
     return 0
 }
 
+# @full-begin
+write_scan_file() {
+    local -a statuses
+    ( "$@" ) | (set -C; command -p cat > "$OUT")
+    statuses=("${PIPESTATUS[@]}")
+    (( statuses[1] == 0 )) || die "写入报告失败: $OUT"
+    return "${statuses[0]}"
+}
+# @full-end
+
 java4shell_main() {
-    local JAVA_PKG_DISTRO= JAVA_PKG_BRANCH= java_pkg_deadline= java_pkg_count=0 java_pkg_limited=false
+    local JAVA_PKG_DISTRO= JAVA_PKG_BRANCH= java_pkg_deadline= java_pkg_attempts=0 java_pkg_count=0 java_pkg_limited=false
     local -a java_pkg_keys=() java_pkg_results=()
+# @full-begin
     parse_args "$@"
+# @full-end
 
     WORK=$(mktemp -d "${SCAN_WORK:-${TMPDIR:-/tmp}}/java4shell.XXXXXX") || die "无法创建临时目录"
     FIND_FILE="$WORK/findings.tsv"
     WARN_FILE="$WORK/warnings.txt"
+# @full-begin
     APP_FILE="$WORK/apps.tsv"
+# @full-end
     ACTIVE_FILE="$WORK/active-ids"
     ROOT_COVERAGE_FILE="$WORK/root-coverage"
-    : > "$ROOT_COVERAGE_FILE"; : > "$WORK/apps-coverage"
-    : > "$FIND_FILE"; : > "$WARN_FILE"; : > "$APP_FILE"; : > "$ACTIVE_FILE"
     trap 'cleanup' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    local work_file
+# @full-begin
+    for work_file in "$ROOT_COVERAGE_FILE" "$WORK/apps-coverage" "$FIND_FILE" "$WARN_FILE" "$APP_FILE" "$ACTIVE_FILE"; do
+# @full-end
+# @batch     for work_file in "$ROOT_COVERAGE_FILE" "$FIND_FILE" "$WARN_FILE" "$ACTIVE_FILE"; do
+        : > "$work_file" || die "无法初始化巡检工作文件"
+    done
 
+# @full-begin
     if [ "$PROC_ONLY" -eq 1 ]; then MODE_NAME="processes-only"; else MODE_NAME="local"; fi
 
     # 输出格式推断
@@ -3956,16 +4463,14 @@ java4shell_main() {
         CPU_SOURCE="demo fixtures"
         if [ -n "$OUT" ]; then
             [ ! -e "$OUT" ] && [ ! -L "$OUT" ] || die "输出文件已存在: $OUT"
-            local demo_rc=0
-            (set -C; exec > "$OUT" || exit 2; run_demo) || demo_rc=$?
-            [ "$demo_rc" -ne 2 ] || die "写入报告失败: $OUT"
-            exit "$demo_rc"
+            write_scan_file run_demo
+            exit $?
         fi
         run_demo
         exit $?
     fi
 
-    if [ -n "$OUT" ] && [ -e "$OUT" ]; then
+    if [[ -n $OUT && ( -e $OUT || -L $OUT ) ]]; then
         die "输出文件已存在，本工具不覆盖: $OUT"
     fi
 
@@ -3982,6 +4487,13 @@ java4shell_main() {
         done
     fi
 
+# @full-end
+# @batch     MODE_NAME=local
+    local RELEASE_NONBLOCK=false java_mounts=$'\n' java_remote_mounts=$'\n'
+    if [[ $OS == Linux ]] && dd iflag=nonblock,fullblock count=0 </dev/null >/dev/null 2>&1; then
+        RELEASE_NONBLOCK=true
+    fi
+    java_mount_snapshot
     java_package_context
     cpu_probe
     note_progress "CPU 条件: ${CPU_STATE}（${CPU_SOURCE}）"
@@ -3997,10 +4509,15 @@ java4shell_main() {
     esac
 
     # --- 运行进程 ---
+# @full-begin
     if [ "$NO_PROC" -eq 0 ]; then
+# @full-end
         if [ "$OS" = "Linux" ]; then
             note_progress "检查运行中的 JVM 进程..."
+# @full-begin
             if (( ${#PID_ARGS[@]} == 0 )) && linux_process_visibility_limited; then
+# @full-end
+# @batch             if linux_process_visibility_limited; then
                 PROCESS_VISIBILITY_LIMITED=true
                 warn "进程视图受限，无法完整核验运行中的 JVM。"
             fi
@@ -4011,6 +4528,7 @@ java4shell_main() {
         else
             warn "当前平台不支持进程发现。"
         fi
+# @full-begin
     fi
 
     # --- 安装目录 ---
@@ -4033,28 +4551,36 @@ java4shell_main() {
         scan_apps "$APPS_DIR" "$APPS_DEPTH"
     fi
 
+# @full-end
+# @batch     scan_installations
     ROOT_DEPTH_BOUNDARIES=$(awk '$0 == "boundary" {count++} END {print count + 0}' "$ROOT_COVERAGE_FILE") ||
         die "无法读取 JDK 搜索覆盖记录"
-    ROOT_SCAN_ERRORS=$(awk '$0 == "error" {count++} END {print count + 0}' "$ROOT_COVERAGE_FILE") ||
+    ROOT_SCAN_ERRORS=$(awk '$0 == "error" || $0 == "mount_skipped" {count++} END {print count + 0}' "$ROOT_COVERAGE_FILE") ||
         die "无法读取 JDK 搜索覆盖记录"
-    APPS_SCAN_ERRORS=$(awk '$0 == "error" {count++} END {print count + 0}' "$WORK/apps-coverage") ||
+# @full-begin
+    APPS_SCAN_ERRORS=$(awk '$0 == "error" || $0 == "mount_skipped" {count++} END {print count + 0}' "$WORK/apps-coverage") ||
         die "无法读取应用搜索覆盖记录"
+# @full-end
     if grep -qx entry_limit "$ROOT_COVERAGE_FILE"; then
         ROOT_ENTRY_LIMIT_REACHED=true
-        warn "JDK 目录搜索达到 $DIRECTORY_ENTRY_LIMIT 个条目的上限。"
+        warn "JDK 搜索达到目录、条目或安装数上限。"
     fi
+# @full-begin
     if grep -qx entry_limit "$WORK/apps-coverage"; then
         APPS_ENTRY_LIMIT_REACHED=true
-        warn "应用目录搜索达到 $DIRECTORY_ENTRY_LIMIT 个条目的上限。"
+        warn "应用搜索达到目录或条目数上限。"
     fi
     if [ "$APPS_SCAN_ERRORS" -gt 0 ]; then warn "应用目录搜索失败，覆盖不完整。"; fi
+# @full-end
     if [ "$ROOT_SCAN_ERRORS" -gt 0 ]; then warn "JDK 目录搜索失败，覆盖不完整。"; fi
     if [ "$PROCESS_LIMIT_REACHED" = true ]; then
         warn "进程检查达到 $PROCESS_SCAN_LIMIT 个条目的上限。"
     fi
+# @full-begin
     if [ "$ROOT_DEPTH_BOUNDARIES" -gt 0 ]; then
         warn "有 $ROOT_DEPTH_BOUNDARIES 个目录达到 --root-depth $ROOT_DEPTH，更深的目录未检查。"
     fi
+# @full-end
 
     if [ "${LIMITED_PROCS:-0}" -gt 0 ]; then
         warn "有 $LIMITED_PROCS 个进程的映射无法读取，进程发现可能不完整。"
@@ -4065,10 +4591,14 @@ java4shell_main() {
         warn "JVM 进程映射达到读取上限，运行时覆盖不完整。"
     fi
 
+# @full-begin
     if [ "$(total_count)" -eq 0 ] && [ "$(apps_count)" -eq 0 ]; then
+# @full-end
+# @batch     if [ "$(total_count)" -eq 0 ]; then
         warn "在本次检查范围内没有找到可评估的 Java 资产。"
     fi
 
+# @full-begin
     if [[ $FORMAT == csv ]] &&
        [[ $PROCESS_LIMIT_REACHED == true || $PROCESS_VISIBILITY_LIMITED == true ||
           $ROOT_ENTRY_LIMIT_REACHED == true || $APPS_ENTRY_LIMIT_REACHED == true ]]; then
@@ -4086,12 +4616,14 @@ java4shell_main() {
     }
 
     if [ -n "$OUT" ]; then
-        (set -C; report_all > "$OUT") || die "写入报告失败: $OUT"
+        write_scan_file report_all || die "写入报告失败: $OUT"
         printf '报告已写入: %s\n' "$OUT" >&2
     else
         report_all
     fi
 
+# @full-end
+# @batch     report_json
     # --- 退出码 ---
     local rc=0 s c oldifs
     oldifs=$IFS
@@ -4106,15 +4638,23 @@ java4shell_main() {
     if [ "$rc" -eq 0 ] && { [ "$(status_count unknown)" -gt 0 ] ||
                            [ "$(total_count)" -eq 0 ] || [ "$LIMITED_PROCS" -gt 0 ] ||
                            [ "$ROOT_DEPTH_BOUNDARIES" -gt 0 ] || [ "$ROOT_SCAN_ERRORS" -gt 0 ] ||
+# @full-begin
                            [ "$APPS_SCAN_ERRORS" -gt 0 ] || [ "$PROCESS_LIMIT_REACHED" = true ] ||
+# @full-end
+# @batch                            [ "$PROCESS_LIMIT_REACHED" = true ] ||
                            [ "$JVM_MAPS_LIMITED" = true ] ||
+                           [ "$java_pkg_limited" = true ] ||
                            [ "$PROCESS_VISIBILITY_LIMITED" = true ] ||
+# @full-begin
                            [ "$ROOT_ENTRY_LIMIT_REACHED" = true ] || [ "$APPS_ENTRY_LIMIT_REACHED" = true ]; }; then
+# @full-end
+# @batch                            [ "$ROOT_ENTRY_LIMIT_REACHED" = true ]; }; then
         rc=3
     fi
     exit "$rc"
 }
 
+# @full-begin
 main() {
     if [ "$#" -eq 0 ]; then audit_all; return; fi
     case $1 in
@@ -4125,11 +4665,140 @@ main() {
         *) java4shell_main "$@" ;;
     esac
 }
+# @full-end
+# @batch main() { audit_all; }
+
+# All blocking scan I/O runs in a verified private group. FD 5 is report output,
+# FD 6 carries small state messages to the scratch owner, and FD 7 checks caller liveness.
+scan_group() (
+    local seconds=$1 watch_caller=$2
+    shift 2
+    set -m || { printf 'result 2\n'; return; }
+    (
+        set +m
+        local leader group heartbeat result read_rc=0 reap_heartbeat=true
+        read -r leader group < <(command -p sh -c 'command -p ps -o ppid= -o pgid= -p "$$"') ||
+            { printf 'result 2\n'; exit; }
+        [[ $leader =~ ^[1-9][0-9]*$ && $leader == "$group" ]] ||
+            { printf 'result 2\n'; exit; }
+        [[ $(trap -p TERM) != "trap -- '' "* ]] || reap_heartbeat=false
+        exec 6>&1
+        exec 4< <(
+            exec 7>&-
+            local code=0
+            "$@" || code=$?
+            printf '%s\n' "$code"
+        )
+        heartbeat=
+        if [[ $watch_caller == true ]]; then
+            (
+                exec 4<&- 5>&- 6>&-
+                trap '' PIPE
+                trap 'exit 0' TERM
+                while printf '\n' >&7; do command -p sleep 1; done 2>/dev/null
+                kill -KILL 0
+            ) &
+            heartbeat=$!
+        fi
+        IFS= read -r -t "$seconds" result <&4 || read_rc=$?
+        trap '' TERM
+        kill -TERM 0
+        if [[ -n $heartbeat && $reap_heartbeat == true ]]; then wait "$heartbeat" 2>/dev/null || :; fi
+        if (( read_rc > 128 )); then
+            printf 'result timeout\n'
+            command -p sleep 1 6>&- 5>&- 7>&-
+        else
+            printf 'result %s\n' "${result:-2}"
+        fi
+        # The group ID is still reserved by this live shell.
+        kill -KILL 0
+    ) </dev/null &
+    wait "$!" 2>/dev/null || :
+)
+
+scan_render() {
+    local scan_dir
+    local -a statuses
+    scan_dir=$(command -p mktemp -d /tmp/x2shell.XXXXXX 6>&- 5>&-) || return 2
+    printf 'work %s\n' "$scan_dir" >&6
+# @full-begin
+    if [[ $format == json && -z $out ]]; then
+# @full-end
+        (exec 5>&- 6>&-; SCAN_WORK=$scan_dir; main "$@") |
+            command -p cat 5>&- 6>&- > "$scan_dir/report"
+        statuses=("${PIPESTATUS[@]}")
+        (( statuses[1] == 0 )) || return 2
+        printf 'publishing\n' >&6
+        command -p cat -- "$scan_dir/report" 6>&- >&5 5>&- || return 2
+# @full-begin
+    else
+        (exec 5>&- 6>&-; SCAN_WORK=$scan_dir; main "$@") |
+            command -p cat 6>&- >&5 5>&-
+        statuses=("${PIPESTATUS[@]}")
+        (( statuses[1] == 0 )) || return 2
+    fi
+# @full-end
+    return "${statuses[0]}"
+}
+
+scan_timeout_report() {
+    exec 6>&-
+# @full-begin
+    if [[ $format == json && -z $out ]]; then
+        local prefix
+        if [[ $mode == --all ]]; then
+            prefix='{"scope":"local_read_only_inventory","java4shell":null,"nginx2root":null,"apache":null,"exit_codes":{"java4shell":3,"nginx2root":3,"apache2root":3},'
+        else
+            prefix='{"findings":[],'
+        fi
+        printf '%s\n' "${prefix}\"status\":\"timeout\",\"coverage\":{\"scan_timed_out\":true,\"scan_timeout_seconds\":$SCAN_TIMEOUT,\"evidence_incomplete\":true}}" >&5
+    else
+        printf '巡检超过 %s 秒，已终止，报告不完整。\n' "$SCAN_TIMEOUT" >&2
+    fi
+# @full-end
+# @batch     local prefix='{"scope":"local_read_only_inventory","java4shell":null,"nginx2root":null,"apache":null,"exit_codes":{"java4shell":3,"nginx2root":3,"apache2root":3},'
+# @batch     printf '%s\n' "${prefix}\"status\":\"timeout\",\"coverage\":{\"scan_timed_out\":true,\"scan_timeout_seconds\":$SCAN_TIMEOUT,\"evidence_incomplete\":true}}" >&5
+}
+
+scan_remove_work() {
+    command -p rm -rf -- "$1" 5>&- 6>&-
+}
+
+scan_supervise() {
+    local kind value scan_dir= rc=2 publishing=false cleanup_result
+    exec 7>&1
+    if [[ $wait_process_substitution == false ]]; then
+        # Older Bash versions do not expose this process substitution through $!.
+        local pid
+        read -r pid < <(command -p sh -c 'command -p ps -o ppid= -p "$$"') || return 2
+        printf 'supervisor %s\n' "$pid" >&7
+    fi
+    while IFS=' ' read -r kind value; do
+        case $kind in
+            work) scan_dir=$value ;;
+            publishing) publishing=true ;;
+            result) rc=$value ;;
+        esac
+    done < <(scan_group "$SCAN_TIMEOUT" true scan_render "$@")
+    # Run scratch cleanup even after the caller PID is gone, with a bounded wait of its own.
+    if [[ -n $scan_dir ]]; then
+        cleanup_result=$(scan_group 2 false scan_remove_work "$scan_dir")
+        if [[ $cleanup_result != "result 0" && $rc != timeout ]]; then rc=2; fi
+    fi
+    if [[ $rc == timeout ]]; then
+        # Never append a timeout object to an already-started JSON report.
+        if [[ $publishing == false ]]; then scan_group 1 true scan_timeout_report >/dev/null; fi
+        rc=3
+    fi
+    (trap '' PIPE; printf 'result %s\n' "$rc" >&7) 2>/dev/null || :
+}
 
 run_scan() {
-    local scan_dir scan_pid scan_group rc format=txt out= arg mode=${1:---all}
+# @full-begin
+    local format=txt out= arg mode=${1:---all}
     local value_for=
-    [[ $SCAN_TIMEOUT =~ ^[1-9][0-9]*$ ]] || die "SCAN_TIMEOUT 需要正整数秒数"
+    [[ $SCAN_TIMEOUT =~ ^[1-9][0-9]{0,3}$ ]] && (( SCAN_TIMEOUT <= 3600 )) ||
+        die "SCAN_TIMEOUT 需要 1 到 3600 之间的整数秒数"
     for arg in "$@"; do
         case $value_for in
             --format) format=$arg; value_for=; continue ;;
@@ -4144,74 +4813,45 @@ run_scan() {
             --) break ;;
         esac
     done
-    scan_dir=$(mktemp -d "${TMPDIR:-/tmp}/x2shell.XXXXXX") || die "无法创建巡检临时目录"
-    trap 'rm -rf -- "$scan_dir"' EXIT
-    mkfifo -- "$scan_dir/control" || die "无法创建巡检控制管道"
 
-    # Only the live group leader signals its own group; a recycled PGID is never used.
-    set -m || die "无法隔离巡检进程组"
-    (
-        set +m
-        exec 3< "$scan_dir/control"
-        IFS= read -r message <&3 && [[ $message == start ]] || exit 2
-        (
-            code=0
-            (
-                SCAN_WORK=$scan_dir
-                if [[ $format == json && -z $out ]]; then exec > "$scan_dir/report"; fi
-                main "$@"
-            ) || code=$?
-            printf 'done %s\n' "$code" > "$scan_dir/control"
-        ) 3<&- &
-        worker=$!
-        message=
-        IFS= read -r -t "$SCAN_TIMEOUT" message <&3 || :
-        case $message in
-            'done '*) wait "$worker" || :; printf '%s\n' "${message#done }" > "$scan_dir/status" ;;
-            *)
-                if [[ $message != cancel ]]; then printf 'timeout\n' > "$scan_dir/status"; fi
-                trap '' TERM
-                kill -TERM 0
-                sleep 1
-                ;;
-        esac
-        kill -KILL 0
-    ) </dev/null &
-    scan_pid=$!
-    set +m
-    exec 3> "$scan_dir/control"
-    read -r scan_group < <(command -p ps -o pgid= -p "$scan_pid" 2>/dev/null) || scan_group=
-    if [[ $scan_group != "$scan_pid" ]]; then
-        printf 'abort\n' >&3
-        wait "$scan_pid" 2>/dev/null || :
-        die "无法确认巡检进程组隔离"
+# @full-end
+# @batch     (( $# == 0 )) || die "用法：bash x2shell-batch.sh"
+# @batch     [[ $SCAN_TIMEOUT =~ ^[1-9][0-9]{0,3}$ ]] && (( SCAN_TIMEOUT <= 3600 )) ||
+# @batch         die "SCAN_TIMEOUT 需要 1 到 3600 之间的整数秒数"
+    local kind value supervisor= rc=2 wait_process_substitution=true
+    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+        wait_process_substitution=false
     fi
     stop_scan() {
-        trap '' INT TERM HUP PIPE
-        { printf 'cancel\n' >&3; } 2>/dev/null || :
-        wait "$scan_pid" 2>/dev/null || :
+        trap '' INT TERM HUP
+        exec 3<&-
+        if [[ $wait_process_substitution == true ]]; then
+            if [[ -n $supervisor ]]; then wait "$supervisor" 2>/dev/null || :; fi
+        else
+            # Bash 3.2 cannot wait on process substitution. Observe its PID without signaling it.
+            local checks=3
+            while [[ -n $supervisor ]] && (( checks > 0 )) &&
+                    command -p ps -p "$supervisor" >/dev/null 2>&1; do
+                checks=$((checks - 1))
+                command -p sleep 1
+            done
+        fi
         exit "$1"
     }
     trap 'stop_scan 130' INT
     trap 'stop_scan 143' TERM
     trap 'stop_scan 129' HUP
-    printf 'start\n' >&3
-    wait "$scan_pid" 2>/dev/null || :
-    exec 3>&-
-    IFS= read -r rc < "$scan_dir/status" || die "巡检进程未返回状态"
-    if [[ $rc == timeout ]]; then
-        printf '巡检超过 %s 秒，已终止，报告不完整。\n' "$SCAN_TIMEOUT" >&2
-        if [[ $format == json && -z $out ]]; then
-            if [[ $mode == --all ]]; then
-                printf '{"scope":"local_read_only_inventory","java4shell":null,"nginx2root":null,"apache":null,"exit_codes":{"java4shell":3,"nginx2root":3,"apache2root":3},'
-            else
-                printf '{"findings":[],'
-            fi
-            printf '"status":"timeout","coverage":{"scan_timed_out":true,"scan_timeout_seconds":%s,"evidence_incomplete":true}}\n' "$SCAN_TIMEOUT"
-        fi
-        exit 3
-    fi
-    if [[ $format == json && -z $out ]]; then cat -- "$scan_dir/report" || exit 2; fi
+    exec 5>&1
+    exec 3< <(scan_supervise "$@")
+    if [[ $wait_process_substitution == true ]]; then supervisor=${!:-}; fi
+    exec 5>&-
+    while IFS=' ' read -r -u 3 kind value; do
+        case $kind in
+            result) rc=$value ;;
+            supervisor) if [[ $value =~ ^[1-9][0-9]*$ ]]; then supervisor=$value; fi ;;
+        esac
+    done
+    exec 3<&-
     exit "$rc"
 }
 

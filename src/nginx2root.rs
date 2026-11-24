@@ -405,7 +405,13 @@ fn layout_config(binary: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn config_hints(files: impl IntoIterator<Item = std::path::PathBuf>) -> Value {
+const INCLUDE_LOOKUP_LIMIT: usize = 128;
+
+#[cfg(target_os = "linux")]
+fn config_hints(
+    files: impl IntoIterator<Item = std::path::PathBuf>,
+    remaining_includes: &mut usize,
+) -> Value {
     use std::{
         collections::{BTreeSet, VecDeque},
         fs,
@@ -426,6 +432,7 @@ fn config_hints(files: impl IntoIterator<Item = std::path::PathBuf>) -> Value {
         })
         .collect();
     let mut seen = BTreeSet::new();
+    let mut expanded = BTreeSet::new();
     let mut evidence = Vec::new();
     let mut include_observed = false;
     while let Some((path, base, depth)) = pending.pop_front() {
@@ -468,6 +475,17 @@ fn config_hints(files: impl IntoIterator<Item = std::path::PathBuf>) -> Value {
                     ("include", value) => {
                         include_observed = true;
                         if depth < 8 && words.next().is_none() {
+                            let target = value.trim_matches(['\'', '"']);
+                            let target_path = base.join(target);
+                            if expanded.contains(&target_path) {
+                                continue;
+                            }
+                            if *remaining_includes == 0 {
+                                skipped += 1;
+                                continue;
+                            }
+                            expanded.insert(target_path);
+                            *remaining_includes -= 1;
                             if let Some(paths) = include_paths(&base, value) {
                                 if pending.len() + paths.len() <= 65 {
                                     pending.extend(
@@ -526,7 +544,7 @@ fn config_hints(files: impl IntoIterator<Item = std::path::PathBuf>) -> Value {
 }
 
 #[cfg(target_os = "linux")]
-fn local_config() -> Value {
+fn local_config(remaining_includes: &mut usize) -> Value {
     use std::{fs, path::PathBuf};
     let mut files = vec![
         PathBuf::from("/etc/nginx/nginx.conf"),
@@ -545,7 +563,7 @@ fn local_config() -> Value {
                 }),
         );
     }
-    config_hints(files)
+    config_hints(files, remaining_includes)
 }
 
 #[cfg(target_os = "linux")]
@@ -737,8 +755,9 @@ pub(crate) fn collect(
             os::unix::fs::MetadataExt,
             path::Path,
         };
+        let mut remaining_includes = INCLUDE_LOOKUP_LIMIT;
         let explicit_config = (!configs.is_empty()).then(|| {
-            let mut config = config_hints(configs.iter().cloned());
+            let mut config = config_hints(configs.iter().cloned(), &mut remaining_includes);
             config["skipped"] = json!(
                 config["skipped"].as_u64().unwrap_or(0)
                     + configs.iter().filter(|path| !path.is_file()).count() as u64
@@ -846,7 +865,7 @@ pub(crate) fn collect(
             {
                 let configuration = config_cache
                     .entry(config.clone())
-                    .or_insert_with(|| config_hints([config.clone()]))
+                    .or_insert_with(|| config_hints([config.clone()], &mut remaining_includes))
                     .clone();
                 row["configuration_entry"] = json!(config);
                 row["configuration"] = configuration;
@@ -880,7 +899,8 @@ pub(crate) fn collect(
                     row["configuration_entry_source"] = json!("explicit");
                 } else if let Some(config) = config {
                     row["configuration_entry"] = json!(config);
-                    row["configuration"] = config_hints([config]);
+                    row["configuration"] = config_cache.entry(config.clone())
+                        .or_insert_with(|| config_hints([config], &mut remaining_includes)).clone();
                     row["configuration_entry_source"] = json!(if system {
                         "system_layout"
                     } else {
@@ -952,7 +972,7 @@ pub(crate) fn collect(
                 }
             });
         json!({"status":"collected","source":"local_binary_inventory","running_processes":running,
-            "installations":installations,"configuration":explicit_config.unwrap_or_else(local_config),"coverage":{"proc_available":proc_available,"truncated":truncated,"configuration_evidence_incomplete":config_incomplete,"configuration_incomplete":config_incomplete},"summary":summary,
+            "installations":installations,"configuration":explicit_config.unwrap_or_else(|| local_config(&mut remaining_includes)),"coverage":{"proc_available":proc_available,"truncated":truncated,"configuration_evidence_incomplete":config_incomplete,"configuration_incomplete":config_incomplete},"summary":summary,
             "sctp":{"kernel_release":kernel_release,"module_visible":Path::new("/sys/module/sctp").exists(),"associations_visible":associations,"modprobe_install_block_hint":sctp_block_hint(),"patch_status":"unknown"},
             "patch_verified":false,"exploitability_confirmed":false,"sources":SOURCES})
     }
@@ -1166,7 +1186,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nginx.conf");
         std::fs::write(&path, "# listen 443 ssl http2;\nserver { http2 off; listen 443 quic; resolver 192.0.2.53; proxy_pass http://$upstream; }\nmail { proxy on; auth_http localhost; }").unwrap();
-        let evidence = config_hints([path]);
+        let evidence = config_hints([path], &mut { INCLUDE_LOOKUP_LIMIT });
         assert_eq!(evidence["http2_on"], false);
         assert_eq!(evidence["http2_off"], true);
         assert_eq!(evidence["http3_or_quic"], true);
@@ -1186,7 +1206,7 @@ mod tests {
         std::fs::create_dir(&snippets).unwrap();
         std::fs::write(&root, "include sites/*.conf;\ninclude missing.conf;\n").unwrap();
         std::fs::write(&child, "# header\nhttp2 on;\ninclude nginx.conf;\n").unwrap();
-        let parsed = config_hints([root.clone()]);
+        let parsed = config_hints([root.clone()], &mut { INCLUDE_LOOKUP_LIMIT });
         assert_eq!(parsed["files_examined"], 2);
         assert_eq!(parsed["skipped"], 1);
         assert_eq!(
@@ -1212,6 +1232,20 @@ mod tests {
         std::fs::create_dir(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "http2 on;").unwrap();
         assert_eq!(layout_config(&dir.path().join("sbin/nginx")), Some(config));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repeated_empty_includes_use_a_single_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("nginx.conf");
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        std::fs::write(&config, "include empty/*.conf;\n".repeat(1200)).unwrap();
+        let mut remaining = 1;
+        let report = config_hints([config.clone()], &mut remaining);
+        assert_eq!(remaining, 0);
+        assert_eq!(report["skipped"], 0);
+        assert_eq!(config_hints([config], &mut remaining)["skipped"], 1200);
     }
 
     #[test]

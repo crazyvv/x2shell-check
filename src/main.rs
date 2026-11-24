@@ -122,18 +122,24 @@ fn check_target(value: &str) -> std::result::Result<String, String> {
 }
 
 const COLLECT_WORKER: &str = "--internal-collect-worker";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const COLLECT_OUTPUT: &str = "--internal-collect-output";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_COLLECT_OUTPUT: usize = 1024 * 1024;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn supervise_collect(seconds: u64, format: collector::CollectFormat) -> Result<i32> {
-    use std::{io::Write as _, process::Stdio, time::Duration};
+    use std::{process::Stdio, time::Duration};
     use tokio::{
-        io::AsyncReadExt as _,
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
         signal::unix::{SignalKind, signal},
+        time::{Instant, sleep_until, timeout},
     };
 
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let mut hangup = signal(SignalKind::hangup())?;
+    let deadline = Instant::now() + Duration::from_secs(seconds);
     #[cfg(target_os = "linux")]
     let reap_helpers = unsafe {
         libc::prctl(
@@ -147,22 +153,23 @@ async fn supervise_collect(seconds: u64, format: collector::CollectFormat) -> Re
     let mut child = tokio::process::Command::new(std::env::current_exe()?)
         .arg(COLLECT_WORKER)
         .args(std::env::args_os().skip(1))
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true)
         .spawn()?;
+    // Keep the sole write end alive until the worker group has been stopped.
+    let _liveness = child.stdin.take().expect("piped worker liveness");
     let pid = child.id().expect("new worker has a process ID") as libc::pid_t;
     let mut pipe = child.stdout.take().expect("piped worker output");
     let mut output = Vec::new();
     let result = async {
         // The collector's host report budget is 190 kB. Allow extra space for CSV formatting.
-        const MAX_REPORT: u64 = 1024 * 1024;
         (&mut pipe)
-            .take(MAX_REPORT + 1)
+            .take(MAX_COLLECT_OUTPUT as u64 + 1)
             .read_to_end(&mut output)
             .await?;
-        if output.len() as u64 > MAX_REPORT {
+        if output.len() > MAX_COLLECT_OUTPUT {
             return Err(std::io::Error::other("本机巡检报告超过输出上限"));
         }
         // Observe exit while retaining the group leader's PID reservation.
@@ -191,7 +198,7 @@ async fn supervise_collect(seconds: u64, format: collector::CollectFormat) -> Re
     };
     let (result, interruption) = tokio::select! {
         result = result => (Some(result), None),
-        _ = tokio::time::sleep(Duration::from_secs(seconds)) => (None, None),
+        _ = sleep_until(deadline) => (None, None),
         _ = interrupt.recv() => (None, Some(130)),
         _ = terminate.recv() => (None, Some(143)),
         _ = hangup.recv() => (None, Some(129)),
@@ -218,29 +225,118 @@ async fn supervise_collect(seconds: u64, format: collector::CollectFormat) -> Re
     if let Some(code) = interruption {
         return Ok(code);
     }
-    if let Some(result) = result {
-        result?;
+    let (exit_code, output_deadline) = if let Some(result) = result {
+        if result.is_err() {
+            return Ok(2);
+        }
         let status = status??;
-        std::io::stdout().lock().write_all(&output)?;
-        return Ok(status.code().unwrap_or(3));
-    }
-
-    eprintln!("巡检超过 {seconds} 秒，已终止，报告不完整。");
-    if matches!(format, collector::CollectFormat::Json) {
+        (status.code().unwrap_or(3), deadline)
+    } else {
+        if !matches!(format, collector::CollectFormat::Json) {
+            return Ok(3);
+        }
         let report = serde_json::json!({
             "schema":"php-selfcheck-host/v1","source":"developer_supplied_unverified","status":"timeout",
             "coverage":{"scan_timed_out":true,"scan_timeout_seconds":seconds},
             "audit":{"evidence_incomplete":true,"reason":"scan_timeout"}
         });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        output = serde_json::to_vec_pretty(&report)?;
+        output.push(b'\n');
+        // The acquisition deadline has elapsed. Allow a short, bounded attempt to deliver
+        // the timeout record to a reader that is still consuming output.
+        (3, Instant::now() + Duration::from_millis(250))
+    };
+    if output.is_empty() || Instant::now() >= output_deadline {
+        return Ok(if output.is_empty() { exit_code } else { 3 });
     }
-    Ok(3)
+
+    // A separate process owns blocking stdout writes. Making the inherited descriptor
+    // nonblocking would also change the caller's open file description.
+    let mut publisher = tokio::process::Command::new(std::env::current_exe()?)
+        .arg(COLLECT_OUTPUT)
+        .arg(seconds.to_string())
+        .stdin(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut input = publisher.stdin.take().expect("piped report input");
+    let publish = async {
+        input.write_all(&(output.len() as u32).to_be_bytes()).await?;
+        input.write_all(&output).await?;
+        publisher.wait().await
+    };
+    let code = tokio::select! {
+        result = publish => return Ok(match result {
+            Ok(status) if status.success() => exit_code,
+            _ => 2,
+        }),
+        _ = sleep_until(output_deadline) => 3,
+        _ = interrupt.recv() => 130,
+        _ = terminate.recv() => 143,
+        _ = hangup.recv() => 129,
+    };
+    let _ = publisher.start_kill();
+    let _ = timeout(Duration::from_millis(100), publisher.wait()).await;
+    Ok(code)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn watch_collect_supervisor(seconds: u64) -> Result<()> {
+    // A manually invoked internal worker must never signal an inherited process group.
+    ensure!(
+        unsafe { libc::getpid() == libc::getpgrp() },
+        "巡检工作进程未处于独立进程组"
+    );
+    std::thread::Builder::new()
+        .name("collect-watchdog".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds + 1);
+            let mut parent = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let timeout = remaining.as_millis() as libc::c_int;
+                let ready = unsafe { libc::poll(&mut parent, 1, timeout) };
+                if ready >= 0
+                    || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    // Only the supervisor holds a writer. EOF after SIGKILL is observable even
+                    // when the worker is blocked in a synchronous filesystem operation.
+                    unsafe { libc::kill(0, libc::SIGKILL) };
+                    break;
+                }
+            }
+        })?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os();
     let executable = args.next().expect("executable argument");
     let mut args = args.peekable();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.next_if(|arg| arg == COLLECT_OUTPUT).is_some() {
+        use std::io::{Read as _, Write as _};
+        let seconds = args
+            .next()
+            .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
+            .filter(|seconds| (1..=3600).contains(seconds))
+            .ok_or_else(|| anyhow::anyhow!("无效的巡检报告写入期限"))?;
+        let mut input = std::io::stdin().lock();
+        let mut size = [0; 4];
+        input.read_exact(&mut size)?;
+        let size = u32::from_be_bytes(size) as usize;
+        ensure!(size <= MAX_COLLECT_OUTPUT, "巡检报告超过输出上限");
+        let mut report = vec![0; size];
+        input.read_exact(&mut report)?;
+        watch_collect_supervisor(seconds)?;
+        let mut output = std::io::stdout().lock();
+        let status = output.write_all(&report).and_then(|()| output.flush());
+        std::process::exit(if status.is_ok() { 0 } else { 2 });
+    }
     let collect_worker = args.next_if(|arg| arg == COLLECT_WORKER).is_some();
     let command = Cli::parse_from(std::iter::once(executable).chain(args)).command;
     let mut runtime = if matches!(&command, Command::Collect(_)) {
@@ -415,6 +511,8 @@ async fn run(command: Command, collect_worker: bool) -> Result<()> {
             if !collect_worker {
                 std::process::exit(supervise_collect(args.scan_timeout, format).await?);
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            watch_collect_supervisor(args.scan_timeout)?;
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let _ = collect_worker;
             let options = args.resolve()?;
