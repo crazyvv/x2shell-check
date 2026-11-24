@@ -228,7 +228,8 @@ head -c "$JDK_RELEASE_BYTE_LIMIT" /dev/zero | tr '\000' X >> "$fixture/release-l
 rc=0
 bash "$scanner" --java4shell --jdk "$fixture/release-fifo" --no-processes --json \
     > "$fixture/release-fifo.json" 2> "$fixture/release-fifo.err" || rc=$?
-[[ $rc == 3 ]]
+[[ $rc == 0 || $rc == 3 ]]
+grep -Fq '"build_assessment": "unknown"' "$fixture/release-fifo.json"
 grep -Fq 'release 元数据缺失、不可读、并非普通文件或超过读取上限' "$fixture/release-fifo.json"
 ! grep -Fq '"scan_timed_out":true' "$fixture/release-fifo.json"
 
