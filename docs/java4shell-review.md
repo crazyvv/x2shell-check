@@ -1,6 +1,6 @@
 # Java4Shell / CVE-2026-114938 防守核验
 
-资料核对时间：2026-11-18（Asia/Shanghai）。本项目只实现无害识别和本地主机证据采集，不包含漏洞触发器、畸形 Base64、内存破坏验证、泄露或命令执行代码。
+资料核对时间：2026-11-24（Asia/Shanghai）。本项目只实现无害识别和本地主机证据采集，不包含漏洞触发器、畸形 Base64、内存破坏验证、泄露或命令执行代码。
 
 ## 已核实事实
 
@@ -17,35 +17,35 @@
 
 远程扫描只复用已经取得的响应，识别 Java 产品特征并输出 `java_product_hint`。它不会为 Java4Shell 增加请求，也不会尝试寻找或调用产品接口。网页证据无法获知 JVM 和 CPU，因此永远不会直接生成“漏洞已确认”。
 
-本地主机采集必须显式开启：
+本地主机采集：
 
 ```bash
-x2shell-check collect --java-command > host-report.json
+bash scripts/x2shell-check.sh --java4shell --json
+x2shell-check collect --java-command
 ```
 
-采集器检查最多 16 个可见 Java 程序和 128 个 JVM 进程：
+- Linux 读取当前可见的 `/proc/PID/maps`，按实际映射的 `libjvm.so` 与磁盘文件关联。设备号、inode、进程身份和映射在采集中复核。已删除、身份不明或中途变动的映射保留待复核。
+- Bash 按逻辑 CPU 读取四项 flags，Rust 交叉核对 CPUID 和 `/proc/cpuinfo`。盘点通过 `release` 读取 JDK 厂商与完整构建。Linux 额外发现当前账号的 SDKMAN 和 Gradle JDK。使用自定义目录的 Maven 工具链和 CI 缓存可通过 Bash `--root` 或 Rust `--java-root` 补查。
+- 运行参数可用 Bash `--jcmd` 或 Rust `--java-attach` 显式读取 `VM.version` 和 `VM.flags -all`。附加可能启动诊断监听器或造成短暂停顿。默认采集不执行 Java，也不读取目标进程环境。显式信任启动参数时，报告区分估算和 jcmd 实测。
+- `--java-path` 可查询指定启动器的版本。配合 `--java-default-flags` 才会另外启动 JVM，对照默认值、命令行关闭、受控 `JAVA_TOOL_OPTIONS` 关闭的值与来源。启动前清除采集器继承的 Java 选项变量。对照只写入 `launcher_flag_probe`，运行中 JVM 的裁决仍依据实际进程证据。
 
-1. 用每个 Java 程序自身的 `-version` 读取厂商、版本和 VM 线索。
-2. 在清除采集器 Java 选项变量后用 `-XX:+PrintFlagsFinal -version` 观察该程序在当前节点的清洁默认值。
-3. 读取当前命名空间可见的架构及 `avx512f`、`avx512bw`、`avx512vbmi`、`bmi2`。
-4. 对正在运行的 JVM 读取命令行后只保留 Java4Shell 相关参数；其他参数被过滤且不保存，进程环境不读取。不使用 `jcmd`、agent、信号或进程附加。
-5. 分别报告版本范围、VM、硬件和缓解线索。任何缺项保持未知。
+未启动的镜像需要挂载后通过明确目录盘点，或在容器内运行采集器。宿主机的包数据库只用于同根目录、同挂载命名空间且映射身份已核实的运行进程。工作负载迁移后需重新核对客户机 CPU。
 
-清洁默认值不等于服务实际参数。实际服务还可能从环境变量、参数文件、容器编排或产品启动器获得覆盖值；主机报告明确记录 `effective_flags_complete=false`。当前节点缺少 AVX-512 只说明当前放置不适用，不能为可能迁移的镜像或工作负载永久清除风险。
+## 发行版软件包证据
 
-## 判定状态
+Linux 默认按实际 `libjvm.so` 查已安装软件包，支持 DEB、RPM 和 APK。基线按发行版、分支和源包匹配，再使用包管理器的原生版本比较。单次巡检最多尝试 12 个不同库路径，软件包子步骤共用 8 秒预算。未匹配到公告时保留包信息和未知补丁状态。
 
-| 状态 | 含义 |
+`package_evidence.patch_status` 是软件包版本与厂商参考的比较结果。只有包版本达到对应基线，并且 `release_build_matches` 为真，才可能将缺少构建裁决的资产认定为达到修复参考。运行进程还要求映射身份可靠且运行自报与磁盘构建一致。此证据来自本机软件包数据库，未校验软件包签名或逐字节核验库文件。
+
+显式 `--java-package-details` 在 Debian/Ubuntu 增加本机 APT 缓存中的候选版本和可读取的压缩 changelog 线索。缓存查询不更新索引。没有 changelog 命中不影响公告判定。RPM 和 Alpine 的修复参考来自维护的厂商公告或发行版仓库元数据。
+
+| 运行态状态 | 含义 |
 | --- | --- |
-| `affected_candidate` | 版本、HotSpot 类 VM 和当前硬件形成候选；输入路径与可利用性未确认 |
-| `affected_candidate_eol` | 非支持版本位于披露范围；应迁移到受支持修复线 |
-| `candidate_hardware_unknown` | 版本/VM 可能适用，CPU 证据不足 |
-| `candidate_default_mitigated` | 采集器清洁环境观察到 `UseBASE64Intrinsics=false` 或 `UseAVX<=2`；不代表服务进程 |
-| `fixed_release` | 达到公开修复基线；仍需厂商构建、运行映像和重启证据 |
-| `not_in_disclosed_range` | 不在通用披露版本范围；Oracle 8u511b33-perf 仍须单独查库存 |
-| `not_applicable_hardware` | 当前节点缺少所需硬件条件；迁移后需重查 |
-| `not_applicable_vm` | OpenJ9/J9 等不使用已披露 HotSpot intrinsic |
-| `unknown` | 版本、VM、CPU 或采集权限不足 |
+| `affected` | 受影响构建、适用的 CPU 和未缓解运行参数均有证据 |
+| `mitigated` | 适用的运行进程具有明确的缓解参数证据 |
+| `not_affected` | 构建、VM 或 CPU 可排除当前适用性 |
+| `potential` | 安装或运行证据提示需复核 |
+| `unknown` | 关键证据缺失或冲突 |
 
 ## 处置顺序
 
@@ -53,6 +53,9 @@ x2shell-check collect --java-command > host-report.json
 
 ## 来源
 
+- [Debian 安全跟踪器](https://security-tracker.debian.org/tracker/CVE-2026-114938)、[Ubuntu CVE](https://ubuntu.com/security/CVE-2026-114938)、[Alpine 安全数据库](https://security.alpinelinux.org/vuln/CVE-2026-114938)。
+- [Red Hat 公告](https://access.redhat.com/security/vulnerabilities/RHSB-2026-018)、[Rocky Linux 安全公告](https://errata.rockylinux.org/)、[AlmaLinux 公告](https://errata.almalinux.org/10/ALSA-2026-100568.html)、[Amazon Linux CVE](https://explore.alas.aws.amazon.com/CVE-2026-114938.html)。
+- [Rocky Linux 中文社区排查流程](https://www.rockylinux.cn/notes/java4shell-cve-2026-114938-find-patch-jvm.html)。
 - [Oracle CVE 记录](https://www.cve.org/CVERecord?id=CVE-2026-114938)，发布时间 2026-11-17。
 - [Oracle November 2026 Critical Security Patch Update](https://www.oracle.com/security-alerts/cspunov2026.html)。
 - [OpenJDK 修复提交 5177a70b385c](https://github.com/openjdk/jdk/commit/5177a70b385c16f26ede191fdac7aaba0bed0f8b)。

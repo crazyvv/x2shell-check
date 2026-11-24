@@ -283,6 +283,14 @@ async fn native_compare(tools: &Tools, manager: &str, version: &str, fixed: &str
     }
     Some(result["output"].as_str()?.trim().parse::<i32>().ok()? >= 0)
 }
+#[cfg(target_os = "linux")]
+pub(crate) async fn java_package_at_least(manager: &str, version: &str, baseline: &str) -> Option<bool> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        native_compare(&Tools::discover(), manager, version, baseline),
+    ).await.ok().flatten()
+}
+
 pub(crate) async fn nginx_package_metadata(path: &str) -> Value {
     let os = os_release(&read(Path::new("/etc/os-release")).unwrap_or_default());
     let mut package = package_for(&Tools::discover(), path, &os, &[]).await;

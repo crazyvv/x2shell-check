@@ -1,0 +1,12 @@
+Ubuntu	21.0.13.0.3+1-1-24.04.1-Ubuntu	unfixed
+OpenJDK	21.0.13.0.3+1	unfixed
+OpenJDK	17.0.6	unknown
+OpenJDK	17.0.6+9	unknown
+OpenJDK	17.0.6+10	unfixed
+OpenJDK	21+35	unfixed
+Red Hat, Inc.	21.0.13.0.9+1	unfixed
+Rocky Linux	25.0.5.0.8+1	unfixed
+Debian	21.0.13+9-1-deb13u2-Debian	unfixed
+OpenJDK	21.0.13.1+2	fixed
+OpenJDK	11.0.33+9	outside_scope
+OpenJDK	1.8.0_441-b07	outside_scope

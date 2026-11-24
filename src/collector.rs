@@ -24,7 +24,12 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
             }
         })
 }
-async fn run_command(exe: &Path, args: &[&str], clear_java_options: bool) -> Value {
+async fn run_command(
+    exe: &Path,
+    args: &[&str],
+    clear_java_options: bool,
+    base64_disabled_environment: bool,
+) -> Value {
     use tokio::io::AsyncReadExt;
     let command: Vec<_> = std::iter::once(exe.to_string_lossy().to_string())
         .chain(args.iter().map(|s| s.to_string()))
@@ -37,6 +42,9 @@ async fn run_command(exe: &Path, args: &[&str], clear_java_options: bool) -> Val
                 .env_remove("JAVA_TOOL_OPTIONS")
                 .env_remove("JDK_JAVA_OPTIONS")
                 .env_remove("_JAVA_OPTIONS");
+            if base64_disabled_environment {
+                process.env("JAVA_TOOL_OPTIONS", "-XX:-UseBASE64Intrinsics");
+            }
         }
         let mut child = process
             .stdin(std::process::Stdio::null())
@@ -93,10 +101,13 @@ async fn run_command(exe: &Path, args: &[&str], clear_java_options: bool) -> Val
     }
 }
 pub(crate) async fn run(exe: &Path, args: &[&str]) -> Value {
-    run_command(exe, args, false).await
+    run_command(exe, args, false, false).await
 }
 pub(crate) async fn run_clean_java(exe: &Path, args: &[&str]) -> Value {
-    run_command(exe, args, true).await
+    run_command(exe, args, true, false).await
+}
+pub(crate) async fn run_java_with_base64_disabled_environment(exe: &Path, args: &[&str]) -> Value {
+    run_command(exe, args, true, true).await
 }
 pub async fn collect() -> Value {
     collect_with_options(&CollectOptions::default()).await
@@ -207,7 +218,7 @@ pub async fn collect_with_options(options: &CollectOptions) -> Value {
     }
     let package_audit = crate::hostaudit::collect(options.package_audit).await;
     let java4shell = if let Some(path) = &options.java_path {
-        let row = crate::java4shell::launcher_gate(path).await;
+        let row = crate::java4shell::launcher_inventory(path, options.java_default_flags, options.java_package_details).await;
         json!({"status":"collected","scope":"explicit_launcher","cve":crate::java4shell::CVE,"runtimes":[row]})
     } else if options.java_command && cfg!(target_os = "linux") {
         json!({"status":"collected","checks":{},"scope":"runtime_audit"})
@@ -462,6 +473,8 @@ pub struct CollectOptions {
     pub java_root: Vec<PathBuf>,
     pub java_jdk: Vec<PathBuf>,
     pub java_path: Option<PathBuf>,
+    pub java_default_flags: bool,
+    pub java_package_details: bool,
     pub java_root_depth: Option<usize>,
     pub java_pid: Vec<u32>,
     pub java_processes_only: bool,
@@ -497,6 +510,8 @@ impl Default for CollectOptions {
             java_root: vec![],
             java_jdk: vec![],
             java_path: None,
+            java_default_flags: false,
+            java_package_details: false,
             java_root_depth: None,
             java_pid: vec![],
             java_processes_only: false,
@@ -521,6 +536,8 @@ impl Default for CollectOptions {
 }
 impl CollectOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.java_default_flags || self.java_path.is_some(), "--java-default-flags 需要 --java-path");
+        anyhow::ensure!(!self.java_package_details || self.java_command, "--java-package-details 需要启用 Java 巡检");
         anyhow::ensure!(
             self.java_path.is_none()
                 || (self.java_command
@@ -709,6 +726,12 @@ pub struct CollectArgs {
     /// 对指定 Java 启动器执行一次 -version，仅判断构建证据
     #[arg(long)]
     pub java_path: Option<PathBuf>,
+    /// 配合 --java-path 对照新 JVM 的默认值和显式关闭值
+    #[arg(long)]
+    pub java_default_flags: bool,
+    /// Java 包查询补充本机 APT 缓存与 changelog 线索
+    #[arg(long)]
+    pub java_package_details: bool,
     /// 内置 Java 判定演示，使用固定数据
     #[arg(long, conflicts_with_all = ["all","java_command","java_path","nginx2root","apache2root","middleware","options","fail_on_risk"])]
     pub demo: bool,
@@ -843,6 +866,8 @@ impl CollectArgs {
         if self.java_path.is_some() {
             options.java_path = self.java_path;
         }
+        options.java_default_flags |= self.java_default_flags;
+        options.java_package_details |= self.java_package_details;
         if let Some(path) = options.java_path.as_mut() {
             *path = std::fs::canonicalize(&*path)?;
             anyhow::ensure!(path.is_file(), "--java-path 需要存在的普通文件");

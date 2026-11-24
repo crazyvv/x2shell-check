@@ -255,7 +255,13 @@ pub(crate) fn release(data: &str) -> Release {
     let full_build = get("JAVA_RUNTIME_VERSION")
         .or_else(|| get("FULL_VERSION"))
         .or_else(|| version.clone())
-        .filter(|value| value.contains('+') || value.contains("-b") || value.contains("-perf"));
+        .filter(|value| {
+            value.contains('+')
+                || value.contains("-b")
+                || value.contains("-perf")
+                || value.contains("_p")
+                || value.matches('.').count() == 4
+        });
     let graalvm_version = get("GRAALVM_VERSION");
     let edition = get("GRAALVM_EDITION")
         .unwrap_or_default()
@@ -337,21 +343,31 @@ pub(crate) fn build_status(r: &Release) -> BuildStatus {
     {
         return NotAffected;
     }
-    let Some(full) = r.full_build.as_deref() else {
+    let Some(full) = r.full_build.as_deref().or(r.version.as_deref()) else {
         return Unknown;
     };
     if vendor == "Oracle Corporation" {
         match full {
-            "1.8.0_511-perf-b33" => return Affected,
-            "1.8.0_513-perf-b4" | "1.8.0_513-perf-b04" => return NotAffected,
+            "1.8.0_511-perf-b33" | "8u511b33-perf" => return Affected,
+            "1.8.0_513-perf-b4" | "1.8.0_513-perf-b04" | "8u513-perf" => return NotAffected,
             _ => {}
         }
     }
-    let Some((version, build)) = full.split_once('+') else {
-        return Unknown;
-    };
-    let Ok(build) = build.split('-').next().unwrap_or_default().parse::<u32>() else {
-        return Unknown;
+    let (version, build) = if let Some((version, build)) = full.split_once('+') {
+        let Ok(build) = build
+            .split(['-', '.'])
+            .next()
+            .unwrap_or_default()
+            .parse::<u32>()
+        else {
+            return Unknown;
+        };
+        (version, Some(build))
+    } else {
+        if !full.contains('.') {
+            return Unknown;
+        }
+        (full, None)
     };
     let Ok(numbers) = version
         .split('.')
@@ -368,6 +384,43 @@ pub(crate) fn build_status(r: &Release) -> BuildStatus {
         padded[..numbers.len()].copy_from_slice(&numbers);
         padded
     };
+    if minor != 0 {
+        return Unknown;
+    }
+    let vendor_lower = vendor.to_ascii_lowercase();
+    let oracle = matches!(vendor_lower.as_str(), "oracle corporation" | "oracle");
+    let corretto = matches!(vendor_lower.as_str(), "amazon.com inc." | "amazon.com inc");
+    let enterprise = matches!(
+        vendor_lower.as_str(),
+        "red hat, inc."
+            | "red hat"
+            | "rocky linux"
+            | "rocky enterprise software foundation"
+            | "almalinux"
+    );
+    let known_openjdk = enterprise
+        || matches!(
+            vendor_lower.as_str(),
+            "openjdk"
+                | "debian"
+                | "ubuntu"
+                | "canonical"
+                | "alpine"
+                | "eclipse adoptium"
+                | "temurin"
+                | "microsoft"
+                | "azul"
+                | "azul systems, inc."
+                | "bellsoft"
+                | "sap se"
+                | "eclipse foundation"
+        );
+    if !(oracle || corretto || known_openjdk) {
+        return Unknown;
+    }
+    if major == 11 {
+        return NotAffected;
+    }
     let (first, last) = match major {
         17 => (6, 21),
         21 => (0, 13),
@@ -375,46 +428,38 @@ pub(crate) fn build_status(r: &Release) -> BuildStatus {
         27 => (0, 1),
         _ => return Unknown,
     };
-    if minor != 0 {
-        return Unknown;
-    }
-    let oracle = vendor == "Oracle Corporation";
-    let corretto = vendor == "Amazon.com Inc.";
-    let known_openjdk = matches!(vendor, "OpenJDK" | "Eclipse Adoptium");
-    if !(oracle || corretto || known_openjdk) {
-        return Unknown;
-    }
     if update < first {
         return NotAffected;
     }
-    if major == 17 && update == 6 && extra == 0 && build < 10 {
+    if major == 17 && update == 6 && extra == 0 && build.is_none_or(|b| b < 10) {
         return Unknown;
     }
-    if oracle && full == "17.0.21.0.3+1" {
+    if enterprise && matches!(version, "21.0.13.0.9" | "25.0.5.0.8") {
         return Affected;
     }
-    if update < last || (update == last && numbers.len() <= 3) {
+    if update < last || (update == last && extra == 0 && numbers.get(4).is_none_or(|v| *v <= 3)) {
         return Affected;
     }
-    // Oracle's November CSPU release notes identify +4 for each of these lines.
-    if oracle && numbers.len() == 4 && update == last && extra == 1 && build == 4 {
+    if oracle && numbers.len() == 4 && update == last && extra == 1 && build == Some(4) {
         return NotAffected;
     }
-    if vendor == "OpenJDK"
+    if vendor_lower == "openjdk"
         && numbers.len() == 4
         && update == last
         && extra == 1
-        && build == if major == 27 { 4 } else { 2 }
+        && build == Some(if major == 27 { 4 } else { 2 })
     {
         return NotAffected;
     }
-    if corretto && numbers.len() == 4 {
+    if corretto && update == last && extra == 1 {
         let fixed_build = if major == 27 { 4 } else { 2 };
         let vendor_build = vendor_version
             .strip_prefix("Corretto-")
             .unwrap_or(vendor_version);
         let fixed = format!("{major}.0.{last}.1.{fixed_build}");
-        if update == last && extra == 1 && vendor_build == fixed && build == fixed_build {
+        if (numbers.len() == 4 && vendor_build == fixed && build == Some(fixed_build))
+            || (numbers.len() == 5 && version == fixed && build.is_none())
+        {
             return NotAffected;
         }
     }
@@ -510,6 +555,70 @@ pub async fn launcher_gate(path: &Path) -> Value {
         "flag_source":"unavailable","effective_flags_complete":false,"command_exit_code":command["exit_code"],"command_error":command["error"]})
 }
 
+pub(crate) async fn launcher_inventory(
+    path: &Path,
+    compare_flags: bool,
+    package_details: bool,
+) -> Value {
+    let mut report = launcher_gate(path).await;
+    #[cfg(target_os = "linux")]
+    crate::java_runtime_audit::launcher_package(path, &mut report, package_details).await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = package_details;
+    if compare_flags {
+        async fn read_flags(path: &Path, args: &[&str], use_environment: bool) -> Value {
+            let result = if use_environment {
+                crate::collector::run_java_with_base64_disabled_environment(path, args).await
+            } else {
+                crate::collector::run_clean_java(path, args).await
+            };
+            if result["exit_code"] != 0 {
+                return json!({"status":"unavailable"});
+            }
+            let output = result["output"].as_str().unwrap_or("");
+            let source = |flag: &str| {
+                output
+                    .lines()
+                    .find(|line| line.split_whitespace().nth(1) == Some(flag))
+                    .and_then(|line| line.trim_end().strip_suffix('}')?.rsplit_once('{'))
+                    .map(|(_, tag)| tag)
+                    .filter(|tag| {
+                        matches!(
+                            *tag,
+                            "default"
+                                | "command line"
+                                | "environment"
+                                | "ergonomic"
+                                | "management"
+                                | "attach"
+                                | "internal"
+                        )
+                    })
+            };
+            let base64 = flag_value(&BASE64_FLAG, output).and_then(|s| s.parse::<bool>().ok());
+            let avx = flag_value(&AVX_FLAG, output).and_then(|s| s.parse::<u32>().ok());
+            json!({"status":if base64.is_some() || avx.is_some() {"observed"} else {"unknown"},
+                "UseBASE64Intrinsics":base64,"UseAVX":avx,
+                "origins":{"UseBASE64Intrinsics":source("UseBASE64Intrinsics"),"UseAVX":source("UseAVX")}})
+        }
+        let default = read_flags(path, &["-XX:+PrintFlagsFinal", "-version"], false).await;
+        let override_flags = read_flags(
+            path,
+            &[
+                "-XX:-UseBASE64Intrinsics",
+                "-XX:+PrintFlagsFinal",
+                "-version",
+            ],
+            false,
+        )
+        .await;
+        let environment = read_flags(path, &["-XX:+PrintFlagsFinal", "-version"], true).await;
+        report["launcher_flag_probe"] = json!({"scope":"isolated_launcher","default":default,
+            "base64_disabled_override":override_flags,"base64_disabled_environment":environment});
+    }
+    report
+}
+
 pub fn demo_report() -> Value {
     let enabled = Flags {
         use_base64_intrinsics: Some(true),
@@ -542,7 +651,7 @@ pub fn demo_report() -> Value {
 }
 
 pub(crate) fn application_inventory(root: &Path, depth: usize) -> Value {
-    const PRODUCTS: [(&str, &str); 11] = [
+    const PRODUCTS: [(&str, &str); 15] = [
         ("keycloak", "Keycloak"),
         ("jira", "Atlassian Jira"),
         ("confluence", "Atlassian Confluence"),
@@ -552,6 +661,10 @@ pub(crate) fn application_inventory(root: &Path, depth: usize) -> Value {
         ("kafka", "Apache Kafka Broker"),
         ("solr", "Apache Solr"),
         ("elasticsearch", "Elasticsearch"),
+        ("logstash", "Logstash"),
+        ("cassandra", "Apache Cassandra"),
+        ("gradle", "Gradle"),
+        ("maven", "Apache Maven"),
         ("gerrit", "Gerrit"),
         ("spinnaker", "Spinnaker"),
     ];
@@ -611,7 +724,12 @@ pub(crate) fn application_inventory(root: &Path, depth: usize) -> Value {
 #[cfg(target_os = "macos")]
 pub async fn collect_macos(options: &crate::collector::CollectOptions) -> Value {
     let mut java = if let Some(path) = &options.java_path {
-        let row = launcher_gate(path).await;
+        let row = launcher_inventory(
+            path,
+            options.java_default_flags,
+            options.java_package_details,
+        )
+        .await;
         let code = match row["status"].as_str() {
             Some("potential") => 1,
             Some("not_affected") => 0,
@@ -782,10 +900,12 @@ pub async fn collect(enabled: bool) -> Value {
             BuildStatus::Affected => ("potential", "disk_build_only"),
             BuildStatus::Unknown => ("unknown", "launcher_release_unavailable_or_unverified"),
         };
-        runtimes.push(json!({"binary":exe,"version":metadata.full_build.or(metadata.version),
+        runtimes.push(
+            json!({"binary":exe,"version":metadata.full_build.or(metadata.version),
             "vendor":metadata.vendor,"product":metadata.product,"build_status":build,
             "status":status,"reason":reason,"version_command_status":"disabled",
-            "flag_source":"unavailable","effective_flags_complete":false}));
+            "flag_source":"unavailable","effective_flags_complete":false}),
+        );
     }
     json!({
         "status":if runtimes.is_empty(){"no_runtime_found"}else{"collected"},
@@ -945,6 +1065,26 @@ pub fn sanitize_host(raw: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bash_and_rust_share_java_build_regressions() {
+        for line in include_str!("../tests/java4shell-builds.tsv").lines() {
+            let mut fields = line.split('\t');
+            let vendor = fields.next().unwrap();
+            let version = fields.next().unwrap();
+            let expected = match fields.next().unwrap() {
+                "fixed" | "outside_scope" => BuildStatus::NotAffected,
+                "unfixed" => BuildStatus::Affected,
+                _ => BuildStatus::Unknown,
+            };
+            let release = Release {
+                full_build: Some(version.into()),
+                vendor: Some(vendor.into()),
+                ..Release::default()
+            };
+            assert_eq!(build_status(&release), expected, "{line}");
+        }
+    }
 
     #[test]
     fn version_cpu_vm_and_mitigation_are_separate() {

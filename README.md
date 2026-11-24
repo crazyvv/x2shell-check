@@ -419,7 +419,9 @@ x2shell-check collect --java-path /opt/jdk/bin/java --fail-on-risk
 x2shell-check collect --demo --format txt
 ```
 
-版本门禁只执行指定启动器的 `-version` 并结合对应 `release` 核对完整构建。命中构建返回候选，运行 JVM 的参数需另行采集。演示使用合成数据，可输出 JSON、文本或 CSV。
+版本门禁默认只执行指定启动器的 `-version`。如需对照新启动 JVM 的参数与来源，可加 `--java-default-flags`。如需读取运行服务的生效参数，使用 Bash `--jcmd` 或 Rust `--java-attach`。演示使用合成数据，可输出 JSON、文本或 CSV。
+
+Linux 的 Java 专项按实际 `libjvm.so` 查已安装的 RPM、DEB 或 APK 包。软件包补丁参考、生效 JVM 构建和进程映射身份分别报告。Debian/Ubuntu 可显式加 `--java-package-details` 读取本机 APT 缓存候选和 changelog；查询不会刷新仓库或安装软件。两端也盘点当前账号 SDKMAN、Gradle 缓存中的常见 JDK 布局。自定义 Maven 工具链、CI 目录或镜像挂载点请用 Bash `--root` 或 Rust `--java-root` 指定。 [Java4Shell 核验说明](docs/java4shell-review.md)
 
 ### Apache2Root（CVE-2026-119618）
 

@@ -15,6 +15,35 @@ assert_build() {
     fi
 }
 
+while IFS=$'\t' read -r vendor version expected; do
+    assert_build "$expected" "$version" "$vendor" "" HotSpot
+done < "$repo/tests/java4shell-builds.tsv"
+cmp "$repo/rules/java4shell-packages.tsv" <(java_package_rules)
+
+(
+    java_pkg_command() {
+        case "$*" in
+            'dpkg-query -S -- /demo/lib/server/libjvm.so')
+                printf '%s\n' 'openjdk-21-jre-headless:amd64: /demo/lib/server/libjvm.so' ;;
+            'dpkg-query -W '*)
+                printf '%s\t%s\t%s\t%s\t%s\n' openjdk-21-jre-headless:amd64 '21.0.13.1+2-1~deb13u1' openjdk-21 '21.0.13.1+2-1~deb13u1' installed ;;
+            'dpkg --compare-versions '*) return 0 ;;
+            'apk info -W -- '*)
+                printf '%s\n' 'demo/lib/server/libjvm.so is owned by openjdk21-jre-headless-21.0.13.1_p2-r0' ;;
+            'apk version -t '*) printf '=' ;;
+            'rpm -qf '*) printf '%s\t%s\t%s\t%s' java-21-openjdk-headless '1:21.0.13.1.2-1.2.el10' 'Rocky Enterprise Software Foundation' 'java-21-openjdk-21.0.13.1.2-1.2.el10.src.rpm' ;;
+            'rpm --eval '*) printf '0' ;;
+            *) return 1 ;;
+        esac
+    }
+    for spec in debian:trixie alpine:3.23 rocky:10; do
+        data=$(java_package_probe /demo/lib/server/libjvm.so "${spec%:*}" "${spec#*:}")
+        [[ $data == *$'\037'meets_vendor_reference$'\037' ]]
+    done
+    [[ $(java_pkg_build apk '21.0.13.1_p2-r0') == 21.0.13.1+2 ]]
+    [[ $(java_pkg_build rpm '1:21.0.13.1.2-1.2.el10') == 21.0.13.1+2 ]]
+)
+
 assert_build unknown 17.0.6 'Oracle Corporation' 'Oracle Java SE' HotSpot
 assert_build unknown 17.0.6+9 'Oracle Corporation' 'Oracle Java SE' HotSpot
 assert_build unfixed 17.0.6+10 'Oracle Corporation' 'Oracle Java SE' HotSpot
@@ -227,6 +256,29 @@ if have timeout || have gtimeout; then
         --java-path "$fixture/launcher/bin/java" --json > "$fixture/report.json"
     grep -Fq '"version": "21.0.13.1+4-LTS"' "$fixture/report.json"
     grep -Fq '"kind": "java-binary", "status": "not_affected"' "$fixture/report.json"
+
+    cat > "$fixture/flag-java" <<'JAVA'
+#!/bin/sh
+case " $* " in
+    *' -XX:-UseBASE64Intrinsics '*) printf '%s\n' 'bool UseBASE64Intrinsics = false {product} {command line}' ;;
+    *' -XX:+PrintFlagsFinal '*)
+        if [ "${JAVA_TOOL_OPTIONS:-}" = -XX:-UseBASE64Intrinsics ]; then
+            printf '%s\n' 'bool UseBASE64Intrinsics = false {product} {environment}'
+        else
+            printf '%s\n' 'bool UseBASE64Intrinsics = true {product} {default}'
+        fi ;;
+    *) printf '%s\n' 'openjdk version "21.0.13.1"' ;;
+esac
+JAVA
+    chmod +x "$fixture/flag-java"
+    rc=0
+    JAVA_TOOL_OPTIONS=-XX:-UseBASE64Intrinsics bash "$scanner" --quiet --no-processes --jdk "$fixture/jdk" \
+        --java-path "$fixture/flag-java" --java-default-flags --json > "$fixture/flag-java.json" || rc=$?
+    [[ $rc == 0 || $rc == 1 || $rc == 3 ]]
+    grep -Fq '"launcher_flag_probe": {"scope":"isolated_launcher","default":{"status":"observed","UseBASE64Intrinsics":true' "$fixture/flag-java.json"
+    grep -Fq '"base64_disabled_override":{"status":"observed","UseBASE64Intrinsics":false' "$fixture/flag-java.json"
+    grep -Fq '"UseBASE64Intrinsics":"command line"' "$fixture/flag-java.json"
+    grep -Fq '"UseBASE64Intrinsics":"environment"' "$fixture/flag-java.json"
 
     cat > "$fixture/noisy-java" <<'JAVA'
 #!/bin/sh

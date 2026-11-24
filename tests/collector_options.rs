@@ -295,3 +295,75 @@ fn java_command_limits_report_complete_json_and_stop_helpers() {
     }
     assert!(!active(), "helper still running after scan timeout");
 }
+#[cfg(target_os = "linux")]
+#[test]
+fn java_installed_package_requires_matching_runtime_build() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+    let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let package = if os.contains("ID=debian\n") && os.contains("VERSION_CODENAME=trixie") {
+        "21.0.13.1+2-1~deb13u1"
+    } else if os.contains("ID=ubuntu\n") && os.contains("VERSION_ID=\"24.04\"") {
+        "21.0.13.1+2-1~24.04.1"
+    } else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let jdk = temp.path().join("jdk");
+    let tools = temp.path().join("tools");
+    fs::create_dir_all(jdk.join("lib/server")).unwrap();
+    fs::create_dir(&tools).unwrap();
+    fs::write(jdk.join("lib/server/libjvm.so"), "").unwrap();
+    let owner = tools.join("dpkg-query");
+    let compare = tools.join("dpkg");
+    fs::write(&owner, concat!("#!/bin/sh\n", "case $1 in\n-S) printf 'openjdk-21-jre-headless:amd64: %s\\n' \"$3\";;\n",
+        "-W) printf 'openjdk-21-jre-headless:amd64\\t%s\\topenjdk-21\\t%s\\tinstalled\\n' \"$PACKAGE_FIXTURE\" \"$PACKAGE_FIXTURE\";;\n*) exit 2;;\nesac\n")).unwrap();
+    fs::write(&compare, "#!/bin/sh\ntest \"$2\" = \"$4\"\n").unwrap();
+    for tool in [&owner, &compare] {
+        fs::set_permissions(tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let cpu = temp.path().join("cpuinfo");
+    fs::write(&cpu, "processor: 0\nflags: avx512f avx512bw avx512vbmi bmi2\n").unwrap();
+    for (build, expected) in [("21.0.13.1+2", "not_affected"), ("21.0.13.1+1", "unknown")] {
+        fs::write(jdk.join("release"), format!("JAVA_VERSION=\"21.0.13.1\"\nJAVA_RUNTIME_VERSION=\"{build}\"\nIMPLEMENTOR=\"Debian\"\n")).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_x2shell-check"))
+            .args(["collect", "--java-command", "--java-no-processes", "--java-jdk"])
+            .arg(&jdk).arg("--java-cpuinfo").arg(&cpu)
+            .env("PATH", &tools).env("PACKAGE_FIXTURE", package)
+            .output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let row = &report["java4shell"]["runtime_audit"]["installations"][0];
+        assert_eq!(row["status"], expected);
+        assert_eq!(row["package_evidence"]["patch_status"], "meets_vendor_reference");
+        assert_eq!(row["package_evidence"]["release_build_matches"], build.ends_with("+2"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_java_flags_report_origins_in_an_isolated_launcher() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+    let temp = tempfile::tempdir().unwrap();
+    let java = temp.path().join("java");
+    fs::write(&java, concat!("#!/bin/sh\n",
+        "case \" $* \" in\n",
+        " *' -XX:-UseBASE64Intrinsics '*) printf 'bool UseBASE64Intrinsics = false {product} {command line}\\n';;\n",
+        " *' -XX:+PrintFlagsFinal '*) if [ \"${JAVA_TOOL_OPTIONS:-}\" = -XX:-UseBASE64Intrinsics ]; then ",
+        "printf 'bool UseBASE64Intrinsics = false {product} {environment}\\n'; else ",
+        "printf 'bool UseBASE64Intrinsics = true {product} {default}\\n'; fi;;\n",
+        " *) printf 'openjdk version \"21.0.13.1\"\\n';;\nesac\n")).unwrap();
+    fs::set_permissions(&java, fs::Permissions::from_mode(0o700)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_x2shell-check"))
+        .args(["collect", "--java-default-flags", "--java-path"]).arg(java)
+        .env("JAVA_TOOL_OPTIONS", "-XX:-UseBASE64Intrinsics").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let row = &report["java4shell"]["runtimes"][0];
+    let flags = &row["launcher_flag_probe"];
+    assert_eq!(flags["scope"], "isolated_launcher");
+    assert_eq!(flags["default"]["origins"]["UseBASE64Intrinsics"], "default");
+    assert_eq!(flags["base64_disabled_override"]["UseBASE64Intrinsics"], false);
+    assert_eq!(flags["base64_disabled_override"]["origins"]["UseBASE64Intrinsics"], "command line");
+    assert_eq!(flags["base64_disabled_environment"]["origins"]["UseBASE64Intrinsics"], "environment");
+    assert_eq!(row["effective_flags_complete"], false);
+}

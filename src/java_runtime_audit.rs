@@ -1,5 +1,6 @@
 //! Local evidence for CVE-2026-114938.
 use crate::collector::{run_clean_java, which};
+use crate::java_packages::{Evidence as PackageEvidence, PackageScan};
 use crate::java4shell::{BuildStatus, Flags, Release, build_status, decision, release};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -283,6 +284,21 @@ fn installations(
             queue.push_front((home, 0, false));
         }
     }
+    if homes.is_empty() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let sdkman = std::env::var_os("SDKMAN_DIR")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|p| p.join(".sdkman")));
+        let gradle = std::env::var_os("GRADLE_USER_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|p| p.join(".gradle")));
+        if let Some(path) = sdkman {
+            queue.push_front((path.join("candidates/java"), 0, false));
+        }
+        if let Some(path) = gradle {
+            queue.push_front((path.join("jdks"), 0, false));
+        }
+    }
     let mut budget = 30000;
     while let Some((path, depth, explicit)) = queue.pop_front() {
         if budget == 0 || found.len() >= 256 {
@@ -364,7 +380,9 @@ fn cpu_profiles(data: &str) -> BTreeMap<Features, usize> {
         if key.trim() == "flags" {
             let flags: BTreeSet<_> = value.split_whitespace().collect();
             *profiles
-                .entry(FEATURES.map(|flag| flags.contains(flag)))
+                .entry(FEATURES.map(|flag| {
+                    flags.contains(flag) || (flag == "avx512vbmi" && flags.contains("avx512_vbmi"))
+                }))
                 .or_default() += 1;
         }
     }
@@ -446,6 +464,91 @@ fn startup_flags(raw: &[u8]) -> Flags {
     flags
 }
 
+async fn package_for(
+    scan: &mut PackageScan,
+    cache: &mut BTreeMap<(PathBuf, FileId), Option<PackageEvidence>>,
+    path: &Path,
+    id: FileId,
+) -> Option<PackageEvidence> {
+    let path = path.canonicalize().ok()?;
+    let current_identity = || {
+        fs::metadata(&path)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| file_id(&m))
+    };
+    if current_identity() != Some(id) {
+        return None;
+    }
+    let key = (path.clone(), id);
+    if let Some(package) = cache.get(&key) {
+        return package.clone();
+    }
+    let package = scan
+        .lookup(&path)
+        .await
+        .filter(|_| current_identity() == Some(id));
+    cache.insert(key, package.clone());
+    package
+}
+
+fn build_with_package(item: &Installation, package: Option<&PackageEvidence>) -> BuildStatus {
+    if item.build_status == BuildStatus::Unknown
+        && !item
+            .release
+            .product
+            .as_deref()
+            .is_some_and(|value| value.contains("GraalVM") || value.contains("OpenJ9"))
+        && package.is_some_and(|package| {
+            package.fixed()
+                && item
+                    .release
+                    .full_build
+                    .as_deref()
+                    .is_some_and(|build| package.matching_build(build))
+        })
+    {
+        BuildStatus::NotAffected
+    } else {
+        item.build_status
+    }
+}
+
+pub(crate) async fn launcher_package(path: &Path, report: &mut Value, details: bool) {
+    if report["command_exit_code"] != 0
+        || report["reason"] == "launcher_version_conflicts_with_release"
+    {
+        return;
+    }
+    let Some(home) = path.parent().and_then(Path::parent) else {
+        return;
+    };
+    let library = home.join("lib/server/libjvm.so");
+    let Ok(meta) = library.metadata() else { return };
+    if !meta.is_file() {
+        return;
+    }
+    let mut scan = PackageScan::new(
+        &small_file(Path::new("/etc/os-release")).unwrap_or_default(),
+        details,
+    );
+    if let Some(package) =
+        package_for(&mut scan, &mut BTreeMap::new(), &library, file_id(&meta)).await
+    {
+        if report["build_status"] == "unknown"
+            && package.fixed()
+            && report["version"]
+                .as_str()
+                .is_some_and(|build| package.matching_build(build))
+        {
+            report["build_status"] = json!(BuildStatus::NotAffected);
+            report["status"] = json!("not_affected");
+            report["reason"] = json!("vendor_package_reference_matches_launcher");
+        }
+        report["package_evidence"] = package.report(report["version"].as_str());
+    }
+}
+
 pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value {
     let attach = options.java_attach;
     let (cpu, evidence) = if let Some(path) = &options.java_cpuinfo {
@@ -476,6 +579,13 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
         } else {
             installations(&options.java_root, &options.java_jdk, depth)
         };
+    let mut package_scan = PackageScan::new(
+        &small_file(Path::new("/etc/os-release")).unwrap_or_default(),
+        options.java_package_details,
+    );
+    let mut package_cache = BTreeMap::new();
+    let host_namespace = fs::read_link("/proc/self/ns/mnt").ok();
+    let host_root = fs::metadata("/").ok().map(|m| file_id(&m));
     let jcmd = attach.then(|| which("jcmd")).flatten();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut processes = vec![];
@@ -543,7 +653,9 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
             }
             (Some(exe), true, Some(started))
                 if start_time(&proc_dir) == Some(started)
-                    && maps_budget.read(&proc_dir).is_ok_and(|current| current == maps) =>
+                    && maps_budget
+                        .read(&proc_dir)
+                        .is_ok_and(|current| current == maps) =>
             {
                 let pid = pid.to_string();
                 let limit = deadline.min(tokio::time::Instant::now() + Duration::from_secs(2));
@@ -590,7 +702,9 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
                     | "attach_budget_exhausted"
             )
             && start_time(&proc_dir) == Some(started)
-            && maps_budget.read(&proc_dir).is_ok_and(|current| current == maps)
+            && maps_budget
+                .read(&proc_dir)
+                .is_ok_and(|current| current == maps)
             && let Ok(command) = tokio::time::timeout_at(
                 deadline.min(tokio::time::Instant::now() + Duration::from_secs(2)),
                 run_clean_java(exe, &[&pid.to_string(), "VM.version"]),
@@ -628,12 +742,40 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
                 (mapping, matched, disk)
             })
             .collect();
+        let package = if single
+            && let Some((id, _)) = runtimes[0].1
+            && host_root.is_some()
+            && fs::metadata(proc_dir.join("root"))
+                .ok()
+                .map(|m| file_id(&m))
+                == host_root
+            && host_namespace.is_some()
+            && fs::read_link(proc_dir.join("ns/mnt")).ok() == host_namespace
+        {
+            package_for(
+                &mut package_scan,
+                &mut package_cache,
+                Path::new(&runtimes[0].0.path),
+                id,
+            )
+            .await
+        } else {
+            None
+        };
         let stable = started.is_some()
             && started == start_time(&proc_dir)
-            && maps_budget.read(&proc_dir).is_ok_and(|current| current == maps)
+            && maps_budget
+                .read(&proc_dir)
+                .is_ok_and(|current| current == maps)
             && runtimes
                 .iter()
                 .all(|(mapping, matched, _)| mapped_disk_id(&proc_dir, mapping) == *matched)
+            && (package.is_none()
+                || (fs::metadata(proc_dir.join("root"))
+                    .ok()
+                    .map(|m| file_id(&m))
+                    == host_root
+                    && fs::read_link(proc_dir.join("ns/mnt")).ok() == host_namespace))
             && started == start_time(&proc_dir);
         if !stable {
             unstable_snapshots += 1;
@@ -658,7 +800,9 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
             .unwrap_or(false);
         let build = disk_evidence
             .filter(|_| identity && !conflict)
-            .map_or(BuildStatus::Unknown, |item| item.build_status);
+            .map_or(BuildStatus::Unknown, |item| {
+                build_with_package(item, package.as_ref())
+            });
         let mut estimated = None;
         if options.java_assume_flags_effective
             && identity
@@ -674,7 +818,9 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
                 .is_ok_and(|n| n <= 65_536)
                 && started.is_some()
                 && start_time(&proc_dir) == started
-                && maps_budget.read(&proc_dir).is_ok_and(|current| current == maps)
+                && maps_budget
+                    .read(&proc_dir)
+                    .is_ok_and(|current| current == maps)
             {
                 let hint = startup_flags(&raw);
                 if hint.use_base64_intrinsics.is_some() || hint.use_avx.is_some() {
@@ -710,7 +856,7 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
         }
         processes.push(json!({
             "pid":pid,"start_time_ticks":started,"status":status,"reason":reason,
-            "build_status":build,"runtime_build":runtime_build,"flag_source":if reason == "operator_trusted_startup_flags" { "startup_arguments_estimated" }
+            "build_status":build,"runtime_build":runtime_build,"package_evidence":package.as_ref().map(|p| p.report(disk_evidence.and_then(|item| item.release.full_build.as_deref()))),"flag_source":if reason == "operator_trusted_startup_flags" { "startup_arguments_estimated" }
                 else if flags.use_base64_intrinsics.is_some() || flags.use_avx.is_some() { "jcmd VM.flags -all" }
                 else { "unavailable" },
             "flag_status":flag_status,"effective_flags":flags,"estimated_startup_flags":estimated,
@@ -722,22 +868,27 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
         }));
     }
     processes.sort_by_key(|p| p["pid"].as_u64());
-    let installations: Vec<_> = disk
-        .values()
-        .filter(|item| !active.contains(&item.id))
-        .map(|item| {
-            let (status, reason) = match (item.build_status, cpu) {
-                (BuildStatus::NotAffected, _) | (_, Some(false)) => {
-                    ("not_affected", "excluded_build_or_cpu")
-                }
-                (BuildStatus::Affected, Some(true)) => {
-                    ("potential", "no_running_jvm_identity_match")
-                }
-                _ => ("unknown", "incomplete_or_conflicting_evidence"),
-            };
-            json!({"status":status,"reason":reason,"installation":item})
-        })
-        .collect();
+    let mut installations = vec![];
+    for item in disk.values().filter(|item| !active.contains(&item.id)) {
+        let package = package_for(
+            &mut package_scan,
+            &mut package_cache,
+            Path::new(&item.libjvm),
+            item.id,
+        )
+        .await;
+        let build = build_with_package(item, package.as_ref());
+        let (status, reason) = match (build, cpu) {
+            (BuildStatus::NotAffected, _) | (_, Some(false)) => {
+                ("not_affected", "excluded_build_or_cpu")
+            }
+            (BuildStatus::Affected, Some(true)) => ("potential", "no_running_jvm_identity_match"),
+            _ => ("unknown", "incomplete_or_conflicting_evidence"),
+        };
+        let mut installation = json!(item);
+        installation["build_status"] = json!(build);
+        installations.push(json!({"status":status,"reason":reason,"installation":installation,"package_evidence":package.as_ref().map(|p| p.report(item.release.full_build.as_deref()))}));
+    }
     json!({
         "cve":"CVE-2026-114938","cpu":evidence,"processes":processes,"installations":installations,
         "advisories":[UPSTREAM, DISCLOSURE, ORACLE,
@@ -746,7 +897,7 @@ pub(crate) async fn collect(options: &crate::collector::CollectOptions) -> Value
             "https://alas.aws.amazon.com/AL2023/ALAS2023-2026-3480.html",
             "https://alas.aws.amazon.com/AL2027/ALAS2027-2026-374.html"],
         "coverage":{"proc_available":proc_available,"unreadable_maps":unreadable_maps,
-            "unstable_snapshots":unstable_snapshots,"process_limit_reached":process_limit_reached,"maps_budget_exhausted":maps_budget.limited,"disk_roots":if options.java_jdk.is_empty() && !options.java_processes_only { ROOTS.as_slice() } else { &[] },"explicit_jdk_homes":options.java_jdk,"extra_roots":options.java_root,"disk_max_depth":depth,"root_depth_truncated":depth_boundaries,"process_scan_enabled":!options.java_no_processes,
+            "unstable_snapshots":unstable_snapshots,"process_limit_reached":process_limit_reached,"maps_budget_exhausted":maps_budget.limited,"package_budget_exhausted":package_scan.limited,"disk_roots":if options.java_jdk.is_empty() && !options.java_processes_only { ROOTS.as_slice() } else { &[] },"explicit_jdk_homes":options.java_jdk,"extra_roots":options.java_root,"disk_max_depth":depth,"root_depth_truncated":depth_boundaries,"process_scan_enabled":!options.java_no_processes,
             "disk_budget_exhausted":disk_budget_exhausted,"unreadable_directories":unreadable_directories},
     })
 }

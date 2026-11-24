@@ -26,6 +26,8 @@ pub mod java4shell;
 
 #[cfg(target_os = "linux")]
 mod java_runtime_audit;
+#[cfg(target_os = "linux")]
+mod java_packages;
 mod nginx2root;
 
 mod apache2root;

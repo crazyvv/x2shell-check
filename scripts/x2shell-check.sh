@@ -35,7 +35,7 @@ set -u
 
 CVE="CVE-2026-114938"
 NICKNAME="Java4Shell"
-RULES_AS_OF="2026-11-18"
+RULES_AS_OF="2026-11-24"
 PROG=${0##*/}
 SCRIPT_VERSION="1.2.5"
 
@@ -60,6 +60,8 @@ APACHE_MAPS_BYTE_LIMIT=1048576   # 每个 Apache 进程的映射读取上限
 APACHE_MAPPED_MODULE_LIMIT=24   # 一次巡检最多读取的不同运行模块二进制
 JVM_MAPS_BYTE_LIMIT=8388608     # 单次 JVM 进程映射读取上限
 JVM_MAPS_TOTAL_BYTE_LIMIT=67108864 # Java 专项映射总读取上限，含身份复核
+JAVA_PACKAGE_LOOKUP_LIMIT=12   # 单轮最多核验的不同 JVM 库文件
+JAVA_PACKAGE_TOTAL_TIMEOUT=8   # Java 软件包查询累计秒数
 PACKAGE_QUERY_TIMEOUT=2        # 单次软件包查询超时（秒）
 PACKAGE_OUTPUT_BYTE_LIMIT=32768 # 单次软件包查询输出上限
 JCMD_TIMEOUT=3                 # 单次 JVM 诊断超时（秒）
@@ -86,6 +88,8 @@ APPS_DIR=""
 FAIL_ON="affected,potential"
 ASSUME_FEFF=0
 JCMD=0
+JAVA_DEFAULT_FLAGS=0
+JAVA_PKG_DETAILS=0
 PROCESS_LIMIT_REACHED=false
 PROCESS_VISIBILITY_LIMITED=false
 JVM_MAPS_LIMITED=false
@@ -142,6 +146,8 @@ Java4Shell / Nginx2Root / Apache2Root 主机暴露面检测（$PROG v$SCRIPT_VER
   --processes-only      只检查进程，跳过安装目录发现
   --no-processes        跳过进程检查，只盘点安装目录
   --java-path PATH      执行指定 Java 启动器的版本检查（需 timeout 或 gtimeout）
+  --java-default-flags  配合 --java-path 对照新 JVM 的默认值和显式关闭值
+  --java-package-details  补充本机 APT 缓存和 changelog 线索
   --cpuinfo PATH        读取指定的普通文件（上限 $CPUINFO_BYTE_LIMIT 字节）
   --apps DIR            按目录名盘点可能的 Java 应用（默认深度 3）
   --apps-depth N        配合 --apps，指定递归深度（默认 3）
@@ -460,6 +466,242 @@ installation_rpm_metadata() {
     return 1
 }
 
+# Standalone copy of rules/java4shell-packages.tsv. The Bash regression suite checks parity.
+java_package_rules() {
+    cat <<'JAVA_PACKAGE_RULES'
+apk	alpine	3.23	openjdk17	17.0.21.1_p2-r0	https://pkgs.alpinelinux.org/package/v3.23/community/x86_64/openjdk17
+apk	alpine	3.23	openjdk21	21.0.13.1_p2-r0	https://pkgs.alpinelinux.org/package/v3.23/community/x86_64/openjdk21
+apk	alpine	3.23	openjdk25	25.0.5.1_p2-r0	https://pkgs.alpinelinux.org/package/v3.23/community/x86_64/openjdk25
+apk	alpine	3.24	openjdk17	17.0.21.1_p2-r0	https://security.alpinelinux.org/vuln/CVE-2026-114938
+apk	alpine	3.24	openjdk21	21.0.13.1_p2-r0	https://security.alpinelinux.org/vuln/CVE-2026-114938
+apk	alpine	3.24	openjdk25	25.0.5.1_p2-r0	https://security.alpinelinux.org/vuln/CVE-2026-114938
+apk	alpine	edge	openjdk17	17.0.21.1_p2-r0	https://security.alpinelinux.org/vuln/CVE-2026-114938
+apk	alpine	edge	openjdk21	21.0.13.1_p2-r0	https://security.alpinelinux.org/vuln/CVE-2026-114938
+dpkg	debian	bookworm	openjdk-17	17.0.21.1+2-1~deb12u1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	debian	sid	openjdk-17	17.0.21.1+2-1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	debian	sid	openjdk-21	21.0.13.1+2-1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	debian	sid	openjdk-25	25.0.5.1+2-1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	debian	sid	openjdk-27	27.0.1.1+4-1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	debian	trixie	openjdk-21	21.0.13.1+2-1~deb13u1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	debian	trixie	openjdk-25	25.0.5.1+2-1~deb13u1	https://security-tracker.debian.org/tracker/CVE-2026-114938
+dpkg	ubuntu	18.04	openjdk-17	17.0.21.1+2-1~18.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	20.04	openjdk-17	17.0.21.1+2-1~20.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	20.04	openjdk-21	21.0.13.1+2-1~20.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	22.04	openjdk-17	17.0.21.1+2-1~22.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	22.04	openjdk-21	21.0.13.1+2-1~22.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	22.04	openjdk-25	25.0.5.1+2-1~22.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	24.04	openjdk-17	17.0.21.1+2-1~24.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	24.04	openjdk-21	21.0.13.1+2-1~24.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	24.04	openjdk-25	25.0.5.1+2-1~24.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.04	openjdk-17	17.0.21.1+2-1~26.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.04	openjdk-17-crac	17.0.21.1+2-0ubuntu1~26.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.04	openjdk-21	21.0.13.1+2-1~26.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.04	openjdk-21-crac	21.0.13.1+2-0ubuntu1~26.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.04	openjdk-25	25.0.5.1+2-1~26.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.04	openjdk-25-crac	25.0.5.1+2-0ubuntu1~26.04.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-17	17.0.21.1+2-1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-17-crac	17.0.21.1+2-0ubuntu1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-21	21.0.13.1+2-1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-21-crac	21.0.13.1+2-0ubuntu1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-25	25.0.5.1+2-1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-25-crac	25.0.5.1+2-0ubuntu1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+dpkg	ubuntu	26.10	openjdk-27	27.0.1.1+4-1~26.10.1	https://ubuntu.com/security/CVE-2026-114938
+rpm	almalinux	10	java-21-openjdk	1:21.0.13.1.2-1.2.el10.alma.1	https://errata.almalinux.org/10/ALSA-2026-100568.html
+rpm	almalinux	10	java-25-openjdk	1:25.0.5.1.2-1.1.el10.alma.1	https://errata.almalinux.org/10/ALSA-2026-100572.html
+rpm	almalinux	8	java-17-openjdk	1:17.0.21.1.2-2.1.el8	https://errata.almalinux.org/8/ALSA-2026-100563.html
+rpm	almalinux	8	java-21-openjdk	1:21.0.13.1.2-1.1.el8	https://errata.almalinux.org/8/ALSA-2026-100567.html
+rpm	almalinux	9	java-17-openjdk	1:17.0.21.1.2-2.2.el9.alma.1	https://errata.almalinux.org/9/ALSA-2026-100564.html
+rpm	almalinux	9	java-21-openjdk	1:21.0.13.1.2-1.2.el9.alma.1	https://errata.almalinux.org/9/ALSA-2026-100567.html
+rpm	almalinux	9	java-25-openjdk	1:25.0.5.1.2-1.1.el9.alma.1	https://errata.almalinux.org/9/ALSA-2026-100571.html
+rpm	amzn	2	java-17-amazon-corretto	17.0.21.1.2-1.amzn2.1	https://alas.aws.amazon.com/AL2/ALAS2-2026-4123.html
+rpm	amzn	2023	java-17-amazon-corretto	17.0.21.1.2-1.amzn2023.1	https://explore.alas.aws.amazon.com/CVE-2026-114938.html
+rpm	amzn	2023	java-21-amazon-corretto	21.0.13.1.2-1.amzn2023.1	https://explore.alas.aws.amazon.com/CVE-2026-114938.html
+rpm	amzn	2023	java-25-amazon-corretto	25.0.5.1.2-1.amzn2023.1	https://explore.alas.aws.amazon.com/CVE-2026-114938.html
+rpm	rhel	10	java-21-openjdk	1:21.0.13.1.2-1.2.el10	https://access.redhat.com/errata/RHSA-2026:100568
+rpm	rhel	10	java-25-openjdk	1:25.0.5.1.2-1.1.el10	https://access.redhat.com/errata/RHSA-2026:100572
+rpm	rhel	8	java-17-openjdk	1:17.0.21.1.2-2.1.el8	https://access.redhat.com/errata/RHSA-2026:100563
+rpm	rhel	8	java-21-openjdk	1:21.0.13.1.2-1.1.el8	https://access.redhat.com/errata/RHSA-2026:100567
+rpm	rhel	9	java-17-openjdk	1:17.0.21.1.2-2.2.el9	https://access.redhat.com/errata/RHSA-2026:100564
+rpm	rhel	9	java-21-openjdk	1:21.0.13.1.2-1.2.el9	https://access.redhat.com/errata/RHSA-2026:100567
+rpm	rhel	9	java-25-openjdk	1:25.0.5.1.2-1.1.el9	https://access.redhat.com/errata/RHSA-2026:100571
+rpm	rocky	10	java-21-openjdk	1:21.0.13.1.2-1.2.el10	https://dl.rockylinux.org/pub/rocky/10/AppStream/x86_64/os/Packages/j/
+rpm	rocky	10	java-25-openjdk	1:25.0.5.1.2-1.1.el10	https://dl.rockylinux.org/pub/rocky/10/AppStream/x86_64/os/Packages/j/
+rpm	rocky	8	java-17-openjdk	1:17.0.21.1.2-2.1.el8_10	https://errata.rockylinux.org/RLSA-2026:100563
+rpm	rocky	8	java-21-openjdk	1:21.0.13.1.2-1.1.el8_10	https://errata.rockylinux.org/RLSA-2026:100567
+rpm	rocky	9	java-17-openjdk	1:17.0.21.1.2-2.2.el9	https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/Packages/j/
+rpm	rocky	9	java-21-openjdk	1:21.0.13.1.2-1.2.el9	https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/Packages/j/
+rpm	rocky	9	java-25-openjdk	1:25.0.5.1.2-1.1.el9	https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/Packages/j/
+JAVA_PACKAGE_RULES
+}
+
+java_pkg_command() {
+    local limiter seconds=$PACKAGE_QUERY_TIMEOUT
+    limiter=$(type -P timeout || type -P gtimeout) || return 1
+    if (( seconds > java_pkg_deadline - SECONDS )); then seconds=$((java_pkg_deadline - SECONDS)); fi
+    (( seconds > 0 )) || return 1
+    bounded_command "$limiter" "$seconds" "$PACKAGE_OUTPUT_BYTE_LIMIT" "$@" 2>/dev/null
+}
+
+java_pkg_build() {
+    local manager=$1 raw=${2##*:} pattern
+    case $manager in
+        rpm) pattern='^([0-9]+(\.[0-9]+)+)\.([0-9]+)-' ;;
+        apk) pattern='^([0-9]+(\.[0-9]+)+)_p([0-9]+)-' ;;
+        *)   pattern='^([0-9]+(\.[0-9]+)+)\+([0-9]+)($|[-.])' ;;
+    esac
+    [[ $raw =~ $pattern ]] || return 1
+    printf '%s+%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+}
+
+java_pkg_compare() {
+    local manager=$1 installed=$2 fixed=$3 a b av ar bv br result rc=0
+    case $manager in
+        dpkg)
+            java_pkg_command dpkg --compare-versions "$installed" ge "$fixed" >/dev/null || rc=$?
+            case $rc in 0) printf meets_vendor_reference ;; 1) printf below_vendor_reference ;; esac ;;
+        apk)
+            result=$(java_pkg_command apk version -t "$installed" "$fixed") || return 0
+            case $result in '='|'>') printf meets_vendor_reference ;; '<') printf below_vendor_reference ;; esac ;;
+        rpm)
+            a=${installed%%:*}; b=${fixed%%:*}
+            if [[ $fixed != *:* ]]; then a=0 b=0; fi
+            [[ $a =~ ^[0-9]{1,8}$ && $b =~ ^[0-9]{1,8}$ ]] || return 0
+            if (( 10#$a != 10#$b )); then
+                if (( 10#$a > 10#$b )); then printf meets_vendor_reference; else printf below_vendor_reference; fi
+                return
+            fi
+            a=${installed#*:}; b=${fixed#*:}
+            av=${a%-*}; ar=${a##*-}; bv=${b%-*}; br=${b##*-}
+            local safe='^[a-zA-Z0-9.+_~^]+$'
+            [[ $av =~ $safe && $ar =~ $safe && $bv =~ $safe && $br =~ $safe ]] || return 0
+            result=$(java_pkg_command rpm --eval "%{lua:local c=rpm.vercmp('$av','$bv'); if c==0 then c=rpm.vercmp('$ar','$br') end; print(c)}") || return 0
+            case $result in 0|1) printf meets_vendor_reference ;; -1) printf below_vendor_reference ;; esac ;;
+    esac
+}
+
+java_apt_details() {
+    local name=$1 out versions changelog size mentions=null
+    if out=$(java_pkg_command apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison "$name"); then
+        versions=$(printf '%s\n' "$out" | LC_ALL=C awk -F '|' '
+            {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)}
+            $2 ~ /^[A-Za-z0-9][A-Za-z0-9.+:_~-]*$/ && !seen[$2]++ {
+                printf "%s\"%s\"", count++ ? "," : "", $2
+                if (count >= 12) exit
+            }')
+        printf ',"repository_candidates":[%s]' "$versions"
+    fi
+    changelog=/usr/share/doc/${name%%:*}/changelog.Debian.gz
+    if [ -f "$changelog" ]; then
+        size=$(stat -Lc '%s' -- "$changelog" 2>/dev/null || :)
+        if [[ $size =~ ^[0-9]+$ && $size -le 131072 ]] &&
+           out=$(java_pkg_command gzip -cd -- "$changelog"); then
+            if [[ $out == *CVE-2026-114938* ]]; then mentions=true; else mentions=false; fi
+        fi
+    fi
+    printf ',"local_changelog_mentions_cve":%s' "$mentions"
+}
+
+java_package_probe() {
+    local path=$1 distro=$2 branch=$3 manager data name source version owned owner sv installed vendor srpm
+    local reference= advisory= patch=unknown details=
+    local token='^[a-zA-Z0-9][a-zA-Z0-9.+:_~^-]{0,127}$'
+    case $distro in
+        debian|ubuntu)
+            manager=dpkg
+            data=$(java_pkg_command dpkg-query -S -- "$path") || return 1
+            [[ $data == *': '* && $data != *$'\n'* ]] || return 1
+            owner=${data%%: *}; owned=${data#*: }
+            [[ $owner =~ $token && $owned == "$path" ]] || return 1
+            data=$(java_pkg_command dpkg-query -W '-f=${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\t${db:Status-Status}\n' -- "$owner") || return 1
+            [[ $data != *$'\n'* ]] || return 1
+            IFS=$'\t' read -r name version source sv installed <<< "$data"
+            [[ $name == "$owner" && $source == openjdk-* && $version == "$sv" && $installed == installed &&
+               ( ${name%%:*} == "$source" || ${name%%:*} == "$source"-* ) ]] || return 1 ;;
+        rocky|rhel|almalinux|amzn)
+            manager=rpm
+            data=$(java_pkg_command rpm -qf --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{VENDOR}\t%{SOURCERPM}\n' -- "$path") || return 1
+            [[ $data != *$'\n'* ]] || return 1
+            IFS=$'\t' read -r name version vendor srpm <<< "$data"
+            [[ $srpm == *.src.rpm ]] || return 1
+            source=${srpm%.src.rpm}; source=${source%-*}; source=${source%-*}
+            [[ $source == java-* && ( $name == "$source" || $name == "$source-headless" ) ]] || return 1
+            case $distro:$(lower "$vendor") in
+                rhel:*'red hat'*|rocky:*rocky*|almalinux:*almalinux*|amzn:*amazon*) ;;
+                *) return 1 ;;
+            esac ;;
+        alpine)
+            manager=apk
+            data=$(java_pkg_command apk info -W -- "$path") || return 1
+            [[ $data == *' is owned by '* && $data != *$'\n'* ]] || return 1
+            owned=${data% is owned by *}; data=${data##* is owned by }
+            [[ ${owned#/} == "${path#/}" && $data =~ ^(openjdk[0-9]+(-[a-z]+)*)-([0-9].*)$ ]] || return 1
+            name=${BASH_REMATCH[1]}; version=${BASH_REMATCH[3]}; source=${name%%-*}
+            case ${name#"$source"} in ""|-jre|-jre-headless|-jdk) ;; *) return 1 ;; esac ;;
+        *) return 1 ;;
+    esac
+    [[ $name =~ $token && $source =~ $token && $version =~ $token ]] || return 1
+    IFS=$'\t' read -r reference advisory < <(java_package_rules | awk -F '\t' -v m="$manager" -v d="$distro" -v b="$branch" -v p="$source" '$1==m && $2==d && $3==b && $4==p {print $5 "\t" $6; exit}') || :
+    if [[ -n $reference ]]; then
+        patch=$(java_pkg_compare "$manager" "$version" "$reference")
+    fi
+    if [[ $manager == dpkg && $JAVA_PKG_DETAILS == 1 ]]; then details=$(java_apt_details "$name"); fi
+    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' "$manager" "$name" "$version" "$reference" "$advisory" "${patch:-unknown}" "$details"
+}
+
+java_package_evidence() {
+    java_package_json=
+    java_package_applies=false
+    local path=$1 identity=$2 build=$3 key data idx m name version baseline advisory patch details package_build runtime_build agrees=false
+    [[ $OS == Linux && -n $path && -n $identity ]] || return 0
+    [[ -n ${JAVA_PKG_DISTRO:-} ]] || return 0
+    path=$(readlink -f -- "$path" 2>/dev/null) || return 0
+    [[ $path == */libjvm.so && -f $path && $path != *[[:cntrl:]]* && $(file_id "$path") == "$identity" ]] || return 0
+    printf -v key '%q:%s' "$path" "$identity"
+    for ((idx=0; idx<java_pkg_count; idx++)); do
+        [[ ${java_pkg_keys[idx]} != "$key" ]] || break
+    done
+    if ((idx == java_pkg_count)); then
+        if ((java_pkg_count >= JAVA_PACKAGE_LOOKUP_LIMIT)); then java_pkg_limited=true; return 0; fi
+        java_pkg_deadline=${java_pkg_deadline:-$((SECONDS + JAVA_PACKAGE_TOTAL_TIMEOUT))}
+        if ((SECONDS >= java_pkg_deadline)); then java_pkg_limited=true; return 0; fi
+        data=$(java_package_probe "$path" "$JAVA_PKG_DISTRO" "$JAVA_PKG_BRANCH") || data=
+        java_pkg_keys[idx]=$key
+        java_pkg_results[idx]=$data
+        java_pkg_count=$((java_pkg_count + 1))
+    else
+        data=${java_pkg_results[idx]}
+    fi
+    [[ -n $data && $(file_id "$path") == "$identity" ]] || return 0
+    IFS=$'\037' read -r m name version baseline advisory patch details <<< "$data"
+    package_build=$(java_pkg_build "$m" "$version") || package_build=
+    runtime_build=$(java_pkg_build jvm "$build") || runtime_build=
+    if [[ -z $runtime_build && $m == apk ]]; then runtime_build=$(java_pkg_build apk "$build") || runtime_build=; fi
+    if [[ -n $package_build && $package_build == "$runtime_build" ]]; then
+        agrees=true
+        [[ $patch != meets_vendor_reference ]] || java_package_applies=true
+    fi
+    java_package_json=$(printf '{"manager":%s,"distribution":%s,"distribution_version":%s,"name":%s,"version":%s,"reference_version":%s,"advisory":%s,"patch_status":%s,"release_build_matches":%s%s}' \
+        "$(jstr "$m")" "$(jstr "$JAVA_PKG_DISTRO")" "$(jstr "$JAVA_PKG_BRANCH")" "$(jstr "$name")" "$(jstr "$version")" \
+        "$(jstr "$baseline")" "$(jstr "$advisory")" "$(jstr "$patch")" "$agrees" "$details")
+}
+
+java_package_context() {
+    [[ $OS == Linux && -f /etc/os-release ]] || return 0
+    JAVA_PKG_DISTRO=$(release_get /etc/os-release ID)
+    JAVA_PKG_BRANCH=$(release_get /etc/os-release VERSION_ID)
+    case $JAVA_PKG_DISTRO in
+        debian) JAVA_PKG_BRANCH=$(release_get /etc/os-release VERSION_CODENAME) ;;
+        rhel|rocky|almalinux) JAVA_PKG_BRANCH=${JAVA_PKG_BRANCH%%.*} ;;
+        alpine)
+            case $JAVA_PKG_BRANCH in
+                *_alpha*) JAVA_PKG_BRANCH=edge ;;
+                *.*.*) JAVA_PKG_BRANCH=${JAVA_PKG_BRANCH%.*} ;;
+            esac ;;
+        ubuntu|amzn) ;;
+        *) JAVA_PKG_DISTRO= ;;
+    esac
+}
+
 java_name() {
     case ${1##*/} in
         [jJ][aA][vV][aA]|[jJ][aA][vV][aA][wW]|[jJ][aA][vV][aA].[eE][xX][eE]|[jJ][aA][vV][aA][wW].[eE][xX][eE]) return 0 ;;
@@ -564,6 +806,12 @@ list_roots() {
         fi
     fi
 
+    if [[ -n ${HOME:-} ]]; then
+        for f in "${SDKMAN_DIR:-$HOME/.sdkman}"/candidates/java/*/release             "${GRADLE_USER_HOME:-$HOME/.gradle}"/jdks/*/release             "${GRADLE_USER_HOME:-$HOME/.gradle}"/jdks/*/*/release; do
+            [ -f "$f" ] && release_is_jdk "$f" && jdk_root_record "${f%/*}"
+        done
+    fi
+
     case $OS in
         Darwin)
             pat="/Library/Java/JavaVirtualMachines/*/Contents/Home/release"
@@ -652,7 +900,7 @@ recognized_jdk_vendor() {
         esac
     fi
     case $v in
-        openjdk|debian|ubuntu|canonical|"eclipse adoptium"|temurin|"amazon.com inc."|"amazon.com inc"|\
+        openjdk|debian|ubuntu|canonical|alpine|"rocky linux"|"rocky enterprise software foundation"|almalinux|"eclipse adoptium"|temurin|"amazon.com inc."|"amazon.com inc"|\
         microsoft|"azul systems, inc."|azul|"red hat, inc."|"red hat"|bellsoft|"sap se"|\
         "eclipse foundation"|"oracle corporation"|oracle)
             return 0 ;;
@@ -804,6 +1052,12 @@ build_assess() {
             return ;;
     esac
 
+    case $vl:$base in
+        "red hat, inc.:"21.0.13.0.9|"red hat, inc.:"25.0.5.0.8|"red hat:"21.0.13.0.9|"red hat:"25.0.5.0.8|        "rocky linux:"21.0.13.0.9|"rocky linux:"25.0.5.0.8|"rocky enterprise software foundation:"21.0.13.0.9|        "rocky enterprise software foundation:"25.0.5.0.8|almalinux:21.0.13.0.9|almalinux:25.0.5.0.8)
+            printf 'unfixed\t已知的旧版企业发行版 OpenJDK 构建'
+            return ;;
+    esac
+
     # ---- 版本形态校验 ----
     local version_pattern='^[0-9]{1,3}(\.[0-9]+){0,4}(\+[0-9]+([.-][A-Za-z0-9.~+_-]+)?)?$'
     if [[ ! $v =~ $version_pattern ]]; then
@@ -937,17 +1191,20 @@ emit_finding() {
     feff=$(san_field "${15:-}")
     container=$(san_field "${16:-}")
     notes=$(san_field "${17:-}")
-    local identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build
+    local identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
     identity_confidence=$(san_field "${18:-}")
     disk_hint_version=$(san_field "${19:-}")
     disk_hint_vendor=$(san_field "${20:-}")
     disk_hint_product=$(san_field "${21:-}")
     disk_hint_build=$(san_field "${22:-}")
 
-    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
+    package_json=${23:-}
+    flag_probe_json=${24:-}
+
+    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
         "$id" "$kind" "$status" "$reason" "$build" "$bevid" "$cpu" "$version" \
         "$jhome" "$vendor" "$product" "$vm" "$arch" "$flags" "$feff" "$container" "$notes" \
-        "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build" \
+        "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build" "$package_json" "$flag_probe_json" \
         >> "$FIND_FILE"
 }
 
@@ -1020,16 +1277,18 @@ scan_installations() {
     local root version vendor product vm arch notes build cpu status mit flags feff vmname vmtext openj9
     local bevid reason bevid_and_build lib lib_id matched rpm_meta rpm_name rpm_file
 
-    local seen_roots=$'\n' root_key
+    local seen_roots=$'\n' root_key pkg_lib pkg_id java_package_json java_package_applies
     while LC_ALL=C IFS= read -r -d '' root; do
         [ -n "$root" ] || continue
         printf -v root_key '%q' "$root"
         [[ $seen_roots != *$'\n'"$root_key"$'\n'* ]] || continue
         seen_roots+="$root_key"$'\n'
-        matched=0
+        matched=0 pkg_lib= pkg_id=
         for lib in "$root"/lib/libjvm.so "$root"/lib/*/libjvm.so                    "$root"/lib/*/*/libjvm.so "$root"/jre/lib/*/libjvm.so "$root"/jre/lib/*/*/libjvm.so; do
             [ -f "$lib" ] || continue
             lib_id=$(file_id "$lib") || continue
+            if [[ -z $pkg_id ]]; then pkg_lib=$lib pkg_id=$lib_id
+            elif [[ $pkg_id != "$lib_id" ]]; then pkg_lib=; fi
             if grep -Fxq -- "$lib_id" "$ACTIVE_FILE"; then matched=1; break; fi
         done
         [ "$matched" -eq 0 ] || continue
@@ -1072,6 +1331,11 @@ scan_installations() {
         build=$(printf '%s' "$bevid_and_build" | cut -f1)
         bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
 
+        java_package_evidence "$pkg_lib" "$pkg_id" "$version"
+        if [[ $java_package_applies == true && $product != *GraalVM* && ( $build == unknown || $build == candidate ) ]]; then
+            build=fixed
+            bevid="本机软件包公告与磁盘 JVM 构建一致"
+        fi
         flags=""
         feff="false"
         mit=0
@@ -1091,7 +1355,7 @@ scan_installations() {
         fi
 
         emit_finding "install:$root" "installation" "$status" "$reason" "$build" "$bevid" \
-            "$cpu" "$version" "$root" "$vendor" "$product" "$vm" "$arch" "$flags" "$feff" "" "$NOTES"
+            "$cpu" "$version" "$root" "$vendor" "$product" "$vm" "$arch" "$flags" "$feff" "" "$NOTES" "" "" "" "" "" "$java_package_json"
     done < <(list_roots)
 }
 
@@ -1308,7 +1572,10 @@ scan_processes() {
     local runtime_version disk_version version_conflict weak_identity
     local identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build
 
-    local scanned=0 jcmd_deadline=
+    local scanned=0 jcmd_deadline= java_package_json java_package_applies
+    local host_mount host_root
+    host_mount=$(readlink /proc/self/ns/mnt 2>/dev/null || :)
+    host_root=$(file_id / || :)
     if [ ${#PID_ARGS[@]} -gt 0 ]; then explicit=1; fi
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
@@ -1509,10 +1776,19 @@ scan_processes() {
 
         container=$(container_hint "$proc")
 
+        java_package_json= java_package_applies=false
+        if [[ $verified == 1 && $version_conflict == 0 && -n $host_mount && -n $host_root &&
+              $(readlink "$proc/ns/mnt" 2>/dev/null) == "$host_mount" &&
+              $(file_id "$proc/root") == "$host_root" ]]; then
+            java_package_evidence "$libpath" "$st" "$version"
+        fi
+
         # --- 采集期间身份是否变化 ---
         start2=$(java_process_start "$pid")
         libmeta3=$(libjvm_meta "$proc")
         if [ -z "$start1" ] || [ "$start1" != "$start2" ] || [ ! -d "$proc" ] ||
+           { [[ -n $java_package_json ]] &&
+             [[ $(readlink "$proc/ns/mnt" 2>/dev/null) != "$host_mount" || $(file_id "$proc/root") != "$host_root" ]]; } ||
            [ "$libmeta3" != "$libmeta" ] || [ "$(file_id "$proc/root$libpath")" != "$st" ] ||
            { [ "$identity_source" = map_files ] && [ "$(file_id "$proc/map_files/$range")" != "$st" ]; }; then
             emit_finding "pid:$pid" "process" "unknown" "采集期间进程已退出或身份发生变化。" \
@@ -1529,6 +1805,10 @@ scan_processes() {
         build=$(printf '%s' "$bevid_and_build" | cut -f1)
         bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
         [ -n "$build" ] || build="unknown"
+        if [[ $java_package_applies == true && $product != *GraalVM* && ( $build == unknown || $build == candidate ) ]]; then
+            build=fixed
+            bevid="本机软件包公告与已核实的运行库构建一致"
+        fi
 
         vmtext=$(lower "${vm:-} ${vmname:-}")
         case $vmtext in *openj9*) openj9=1 ;; *) openj9=0 ;; esac
@@ -1602,7 +1882,7 @@ scan_processes() {
         emit_finding "pid:$pid" "process" "$status" "$reason" "$build" "$bevid" \
             "$cpu" "$version" "$root_disp" "$vendor" "$product" "$vm" "$arch" \
             "$flags" "$feff" "$container" "$NOTES" \
-            "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build"
+            "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build" "$java_package_json"
     done < <(
         if [ "$explicit" -eq 1 ]; then
             printf '%s\n' ${PID_ARGS[@]+"${PID_ARGS[@]}"}
@@ -1675,12 +1955,40 @@ scan_processes_other() {
 # ---------------------------------------------------------------------------
 # 采集：java -version 门禁
 # ---------------------------------------------------------------------------
+java_launcher_flags() (
+    local limiter=$1 java=$2 mode=$3 out
+    shift 3
+    unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS
+    if [[ $mode == environment ]]; then export JAVA_TOOL_OPTIONS=-XX:-UseBASE64Intrinsics; fi
+    if ! out=$(bounded_command "$limiter" "$JAVA_VERSION_TIMEOUT" "$JCMD_OUTPUT_BYTE_LIMIT" --merge-stderr \
+        "$java" "$@" -XX:+PrintFlagsFinal -version); then
+        printf '{"status":"unavailable"}'
+        return
+    fi
+    printf '%s\n' "$out" | awk '
+        ($2 == "UseBASE64Intrinsics" || $2 == "UseAVX") && ($3 == "=" || $3 == ":=") &&
+            (($2 == "UseBASE64Intrinsics" && $4 ~ /^(true|false)$/) || ($2 == "UseAVX" && $4 ~ /^[0-9]$/)) {
+            key=$2; val[key]=$4
+            if (match($0, /\{(default|command line|environment|ergonomic|management|attach|internal)\}[[:space:]]*$/)) {
+                tag=substr($0,RSTART+1,RLENGTH-2); sub(/\}[[:space:]]*$/, "", tag); origin[key]="\"" tag "\""
+            }
+        }
+        END {
+            printf "{\"status\":\"%s\",\"UseBASE64Intrinsics\":%s,\"UseAVX\":%s,\"origins\":{\"UseBASE64Intrinsics\":%s,\"UseAVX\":%s}}",
+                (("UseBASE64Intrinsics" in val) || ("UseAVX" in val) ? "observed" : "unknown"),
+                (val["UseBASE64Intrinsics"] == "" ? "null" : val["UseBASE64Intrinsics"]),
+                (val["UseAVX"] == "" ? "null" : val["UseAVX"]),
+                (origin["UseBASE64Intrinsics"] == "" ? "null" : origin["UseBASE64Intrinsics"]),
+                (origin["UseAVX"] == "" ? "null" : origin["UseAVX"])
+        }'
+)
+
 scan_java_binary() {
     local bin=$1 out version vendor vm arch product build bevid cpu status reason notes home full_version
     [ -f "$bin" ] || die "java 可执行文件不存在: $bin"
     [ -x "$bin" ] || die "java 不可执行: $bin"
 
-    local timeout_bin rc=0
+    local timeout_bin rc=0 flag_probe_json= default_flags override_flags environment_flags disk_build java_package_json= java_package_applies=false library library_id
     timeout_bin=$(type -P timeout || type -P gtimeout) ||
         die "--java-path 需要 timeout 或 gtimeout；未执行 Java 启动器"
     [[ $bin == /* ]] || bin="$PWD/$bin"
@@ -1736,13 +2044,35 @@ scan_java_binary() {
     bevid=$(printf '%s' "$bevid_and_build" | cut -f2-)
     [ -n "$build" ] || build="unknown"
 
-    # -version 门禁没有可信的启动参数证据，按未缓解处理
+    disk_build=$(release_get "$home/release" JAVA_RUNTIME_VERSION)
+    if runtime_version_conflicts "$full_version" "$disk_build"; then
+        build=unknown
+        bevid="启动器构建与磁盘 release 不一致"
+    elif [[ -n $home && -n $full_version ]]; then
+        library="$home/lib/server/libjvm.so"
+        library_id=$(file_id "$library") || library_id=
+        java_package_evidence "$library" "$library_id" "$full_version"
+        if [[ $java_package_applies == true && $product != *GraalVM* && ( $build == unknown || $build == candidate ) ]]; then
+            build=fixed
+            bevid="本机软件包公告与启动器构建一致"
+        fi
+    fi
+
+    if (( JAVA_DEFAULT_FLAGS == 1 )); then
+        default_flags=$(java_launcher_flags "$timeout_bin" "$bin" default)
+        override_flags=$(java_launcher_flags "$timeout_bin" "$bin" command -XX:-UseBASE64Intrinsics)
+        environment_flags=$(java_launcher_flags "$timeout_bin" "$bin" environment)
+        flag_probe_json=$(printf '{"scope":"isolated_launcher","default":%s,"base64_disabled_override":%s,"base64_disabled_environment":%s}' "$default_flags" "$override_flags" "$environment_flags")
+        notes="${notes:+$notes | }新启动 JVM 对照（不参与现有运行进程裁决）：默认 $default_flags；命令行关闭 $override_flags；环境变量关闭 $environment_flags"
+    fi
+
+    # -version 门禁没有可信的运行进程参数证据。
     status=$(classify "$build" "$cpu" 0 0 "$(norm_arch "$arch")" installation)
     reason=$(make_reason "$status" "$build" "$bevid" "$cpu" 0 "$(norm_arch "$arch")" \
         "（本项来自 java -version 门禁，未校验运行参数）")
 
     emit_finding "java:$bin" "java-binary" "$status" "$reason" "$build" "$bevid" \
-        "$cpu" "$version" "$bin" "$vendor" "${product:-}" "${vm:-}" "$arch" "" "false" "" "$notes"
+        "$cpu" "$version" "$bin" "$vendor" "${product:-}" "${vm:-}" "$arch" "" "false" "" "$notes" "" "" "" "" "" "$java_package_json" "$flag_probe_json"
 }
 
 # ---------------------------------------------------------------------------
@@ -1773,6 +2103,10 @@ scan_apps() {
             *kafka*)        label="Apache Kafka Broker" ;;
             *solr*)         label="Apache Solr" ;;
             *elasticsearch*) label="Elasticsearch" ;;
+            *logstash*)     label="Logstash" ;;
+            *cassandra*)    label="Apache Cassandra" ;;
+            *gradle*)       label="Gradle" ;;
+            *maven*)        label="Apache Maven" ;;
             *gerrit*)       label="Gerrit" ;;
             *spinnaker*)    label="Spinnaker" ;;
         esac
@@ -1896,7 +2230,7 @@ txt_header() {
 
 report_txt() {
     local total affected potential mitigated notaffected unknown
-    local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build
+    local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
 
     total=$(total_count)
     affected=$(status_count affected)
@@ -1926,7 +2260,7 @@ report_txt() {
     fi
 
     if [ "$DETAILS" -eq 0 ]; then
-        while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build; do
+        while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json; do
             case $status in
                 affected|potential|unknown)
                     printf '  %s  %s\n' "$(status_label "$status")" "$(brief_name "$id" "$kind" "$version")" ;;
@@ -1945,13 +2279,14 @@ report_txt() {
     fi
 
     # ---- 详细模式 ----
-    while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build; do
+    while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json; do
         printf '\n=== %s [%s]\n' "$id" "$kind"
         printf '  状态      : %s（构建判定: %s；CPU: %s）\n' "$(status_label "$status")" "$(build_label "$build")" "$cpu"
         printf '  版本      : %s\n' "${version:-未知}"
         printf '  厂商/产品 : %s / %s\n' "${vendor:-未知}" "${product:-未知}"
         printf '  VM/架构   : %s / %s\n' "${vm:-未知}" "${arch:-未知}"
         printf '  Java Home : %s\n' "${jhome:-—}"
+        if [[ -n $package_json ]]; then printf '  软件包证据: %s\n' "$package_json"; fi
         if [ -n "$disk_hint_build" ]; then
             printf '  磁盘证据  : %s · %s / %s · %s（仅供参考）\n' \
                 "${disk_hint_version:-未知}" "${disk_hint_vendor:-未知}" "${disk_hint_product:-未知}" "$(build_label "$disk_hint_build")"
@@ -2044,7 +2379,7 @@ json_notes() {
 }
 
 report_json() {
-    local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build
+    local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
     local first=1 total affected potential mitigated notaffected unknown apps
 
     total=$(total_count)
@@ -2065,9 +2400,9 @@ report_json() {
     printf '  "cpu": {"arch": %s, "state": %s, "required_features": %s, "counts": %s, "source": %s},\n' \
         "$(jstr "$ARCH_RAW")" "$(jstr "$CPU_STATE")" "$(jstr "$REQ_FEATURES")" "$(jstr "$CPU_COUNTS")" "$(jstr "$CPU_SOURCE")"
 
-    printf '  "coverage": {"root_max_depth": %s, "root_depth_boundaries": %s, "root_scan_errors": %s, "unreadable_process_maps": %s, "process_limit_reached": %s, "process_visibility_limited": %s, "root_entry_limit_reached": %s, "apps_entry_limit_reached": %s, "apps_scan_errors": %s, "jvm_maps_limited": %s},\n' \
+    printf '  "coverage": {"root_max_depth": %s, "root_depth_boundaries": %s, "root_scan_errors": %s, "unreadable_process_maps": %s, "process_limit_reached": %s, "process_visibility_limited": %s, "root_entry_limit_reached": %s, "apps_entry_limit_reached": %s, "apps_scan_errors": %s, "jvm_maps_limited": %s, "package_budget_exhausted": %s},\n' \
         "$((10#$ROOT_DEPTH))" "$ROOT_DEPTH_BOUNDARIES" "$ROOT_SCAN_ERRORS" "$LIMITED_PROCS" \
-        "$PROCESS_LIMIT_REACHED" "$PROCESS_VISIBILITY_LIMITED" "$ROOT_ENTRY_LIMIT_REACHED" "$APPS_ENTRY_LIMIT_REACHED" "$APPS_SCAN_ERRORS" "$JVM_MAPS_LIMITED"
+        "$PROCESS_LIMIT_REACHED" "$PROCESS_VISIBILITY_LIMITED" "$ROOT_ENTRY_LIMIT_REACHED" "$APPS_ENTRY_LIMIT_REACHED" "$APPS_SCAN_ERRORS" "$JVM_MAPS_LIMITED" "${java_pkg_limited:-false}"
 
     printf '  "warnings": ['
     first=1
@@ -2081,7 +2416,7 @@ report_json() {
 
     printf '  "findings": [\n'
     first=1
-    while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build; do
+    while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json; do
         [ -n "$id" ] || continue
         [ "$first" -eq 1 ] || printf ',\n'
         first=0
@@ -2105,6 +2440,8 @@ report_json() {
                 "$(jstr "$disk_hint_version")" "$(jstr "$disk_hint_vendor")" \
                 "$(jstr "$disk_hint_product")" "$(jstr "$disk_hint_build")"
         fi
+        if [[ -n $package_json ]]; then printf ', "package_evidence": %s' "$package_json"; fi
+        if [[ -n $flag_probe_json ]]; then printf ', "launcher_flag_probe": %s' "$flag_probe_json"; fi
         printf '}'
     done < "$FIND_FILE"
     printf '\n  ],\n'
@@ -2140,14 +2477,14 @@ csv_line() {
 }
 
 report_csv() {
-    local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build
-    printf '%s\n' "cve,rules_as_of,mode,id,kind,status,reason,build_assessment,build_evidence,cpu_assessment,version,java_home,vendor,product,vm,arch,cpu_state,cpu_source,patch,patch_ref,flags,flags_effective,container,notes,identity_confidence,disk_version,disk_vendor,disk_product,disk_build_assessment"
-    while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build; do
+    local id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json
+    printf '%s\n' "cve,rules_as_of,mode,id,kind,status,reason,build_assessment,build_evidence,cpu_assessment,version,java_home,vendor,product,vm,arch,cpu_state,cpu_source,patch,patch_ref,flags,flags_effective,container,notes,identity_confidence,disk_version,disk_vendor,disk_product,disk_build_assessment,package_evidence,launcher_flag_probe"
+    while IFS=$'\037' read -r id kind status reason build bevid cpu version jhome vendor product vm arch flags feff container notes identity_confidence disk_hint_version disk_hint_vendor disk_hint_product disk_hint_build package_json flag_probe_json; do
         [ -n "$id" ] || continue
         csv_line "$CVE" "$RULES_AS_OF" "$MODE_NAME" "$id" "$kind" "$status" "$reason" \
             "$build" "$bevid" "$cpu" "$version" "$jhome" "$vendor" "$product" "$vm" "$arch" \
             "$CPU_STATE" "$CPU_SOURCE" "" "" "$flags" "$feff" "$container" "$notes" \
-            "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build"
+            "$identity_confidence" "$disk_hint_version" "$disk_hint_vendor" "$disk_hint_product" "$disk_hint_build" "$package_json" "$flag_probe_json"
         printf '\n'
     done < "$FIND_FILE"
 }
@@ -2173,6 +2510,8 @@ parse_args() {
             --pid)        [ $# -ge 2 ] || die "--pid 需要一个进程号"
                           case $2 in ''|*[!0-9]*) die "--pid 需要正整数: $2" ;; esac
                           PID_ARGS[${#PID_ARGS[@]}]=$2; shift 2 ;;
+            --java-default-flags) JAVA_DEFAULT_FLAGS=1; shift ;;
+            --java-package-details) JAVA_PKG_DETAILS=1; shift ;;
             --java-path)  [ $# -ge 2 ] || die "--java-path 需要一个路径"; JAVA_BINS[${#JAVA_BINS[@]}]=$2; shift 2 ;;
             --cpuinfo)    [ $# -ge 2 ] || die "--cpuinfo 需要一个路径"; CPUINFO=$2; shift 2 ;;
             --apps)       [ $# -ge 2 ] || die "--apps 需要一个目录"; APPS_DIR=$2; shift 2 ;;
@@ -2216,6 +2555,9 @@ parse_args() {
         die "--processes-only 与 --root 不能同时使用"
     fi
 
+    if (( JAVA_DEFAULT_FLAGS == 1 )) && (( ${#JAVA_BINS[@]} == 0 || DEMO == 1 )); then
+        die "--java-default-flags 需要 --java-path"
+    fi
     local status_pattern='(affected|potential|mitigated|not_affected|unknown)'
     local failure_pattern="^${status_pattern}(,${status_pattern})*$"
     [[ $FAIL_ON =~ $failure_pattern ]] ||
@@ -3213,7 +3555,7 @@ audit_all() {
     while (($#)); do
         case $1 in
             --json) format=json ;;
-            --jcmd) java_args+=("$1") ;;
+            --jcmd|--java-package-details) java_args+=("$1") ;;
             --nginx-path|--nginx-config)
                 (($# >= 2)) || die "$1 需要一个路径"
                 nginx_args+=("$1" "$2"); shift ;;
@@ -3582,6 +3924,8 @@ nginx2root_scan() {
 }
 
 java4shell_main() {
+    local JAVA_PKG_DISTRO= JAVA_PKG_BRANCH= java_pkg_deadline= java_pkg_count=0 java_pkg_limited=false
+    local -a java_pkg_keys=() java_pkg_results=()
     parse_args "$@"
 
     WORK=$(mktemp -d "${SCAN_WORK:-${TMPDIR:-/tmp}}/java4shell.XXXXXX") || die "无法创建临时目录"
@@ -3638,6 +3982,7 @@ java4shell_main() {
         done
     fi
 
+    java_package_context
     cpu_probe
     note_progress "CPU 条件: ${CPU_STATE}（${CPU_SOURCE}）"
 
