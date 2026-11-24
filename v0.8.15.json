@@ -1,0 +1,45 @@
+{
+  "state": "published",
+  "tag": "v0.8.15",
+  "repository": "crazyvv/x2shell-check",
+  "source_commit": "e8dd82ec973f3d8b3d4e76cd63c256d8be94a1b0",
+  "release_url": "https://github.com/crazyvv/x2shell-check/releases/tag/v0.8.15",
+  "published_at": "2026-11-24T03:37:18Z",
+  "checksums": {
+    "x2shell-check-v0.8.15-linux-x86_64.tar.gz": "59c224bd8b5a212008e3e61a16828599025fa009b25a8406415aa4fe3a55a922",
+    "x2shell-check-v0.8.15-windows-x86_64.zip": "70772fa370fec27174efd5a2c6c8845e4b5dc487ef1897c3f3f27c0979533d80",
+    "x2shell-check.sh": "cd07ae4eb77670316a40881cb02f6b4c496037a257a3bb40650be076a5220826",
+    "x2shell-batch.sh": "419d312e8d5ccb4083a4f2b3abdcf00ebdf43320cc3fc0c500b2b8181035d615"
+  },
+  "verified_by_download": true,
+  "workflow_run": "https://github.com/crazyvv/x2shell-check/actions/runs/45320038311",
+  "browser_check": {
+    "state": "passed",
+    "checks": [
+      "java4shell-passive-and-host-evidence",
+      "desktop-density-and-palette",
+      "desktop-knowledge-grid",
+      "module-links-and-script-download",
+      "evidence-fonts-colors",
+      "text-only-rendering",
+      "knowledge-page-attribution",
+      "runtime-report-comparison",
+      "rule-edit-validation-save",
+      "live-activation",
+      "conflict-preserves-draft",
+      "logout-cleanup",
+      "passive-surface-clues",
+      "settings-import-validation-save",
+      "settings-live-policy",
+      "settings-conflict-preserves-draft",
+      "progress-permissions-and-defaults"
+    ],
+    "evidence_style": {
+      "family": "ui-monospace, \"Cascadia Code\", Consolas, monospace",
+      "weight": "700",
+      "color": "rgb(159, 29, 20)",
+      "background": "rgb(255, 220, 216)"
+    }
+  },
+  "recorded_at": "2026-11-24T03:37:19.577354+00:00"
+}
